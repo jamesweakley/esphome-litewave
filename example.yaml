@@ -1,0 +1,72 @@
+esphome:
+  name: litewave-switch
+
+esp32:
+  variant: ESP32C6
+  board: esp32-c6-devkitm-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+api:
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+# Litewave — raw 802.15.4 TX for Nanoleaf control
+# Step 1: Set sniff: true, flash, press Sense+ ON and OFF, copy tokens from logs
+# Step 2: Fill in group tokens below, set sniff: false, reflash
+litewave:
+  channel: 26
+  pan_id: 0x3B71
+  sniff: false
+
+  groups:
+    - id: living_room
+      on_sequence: 0xFB
+      on_token: "949B16B63E32024A9DD73E03604D"
+      off_sequence: 0xFD
+      off_token: "9ACC50F8E109757695C384C4EA74"
+
+# Physical button
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO9
+      mode:
+        pullup: true
+        input: true
+      inverted: true
+    name: "Button 1"
+    on_press:
+      - light.toggle: user_led_1
+
+# LED output
+output:
+  - platform: gpio
+    pin:
+      number: GPIO15
+      inverted: true
+    id: button_led_pin_1
+
+# Binary light — LED state drives Litewave commands
+light:
+  - platform: binary
+    name: "Living Room Lights"
+    output: button_led_pin_1
+    id: user_led_1
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - litewave.send_on:
+          group: living_room
+    on_turn_off:
+      - litewave.send_off:
+          group: living_room
