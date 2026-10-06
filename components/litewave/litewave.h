@@ -76,6 +76,7 @@ class LitewaveComponent : public Component {
     uint8_t channel_{26};
     uint16_t pan_id_{0x3B71};
     bool sniff_{false};
+    bool has_openthread_{false};
     std::vector<LitewaveGroup *> groups_;
 
     SemaphoreHandle_t tx_sem_{nullptr};

@@ -1,0 +1,49 @@
+esphome:
+  name: litewave-test
+
+esp32:
+  variant: ESP32C6
+  board: esp32-c6-devkitm-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+
+wifi:
+  ssid: "test"
+  password: "testtest"
+
+litewave:
+  channel: 26
+  pan_id: 0x3B71
+  sniff: true
+  groups:
+    - id: test_group
+      on_sequence: 0xFB
+      on_token: "949B16B63E32024A9DD73E03604D"
+      off_sequence: 0xFD
+      off_token: "9ACC50F8E109757695C384C4EA74"
+
+output:
+  - platform: gpio
+    pin:
+      number: GPIO15
+      inverted: true
+    id: led_pin
+
+light:
+  - platform: binary
+    name: "Test Light"
+    output: led_pin
+    id: test_light
+    on_turn_on:
+      - litewave.send_on:
+          group: test_group
+    on_turn_off:
+      - litewave.send_off:
+          group: test_group

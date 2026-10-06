@@ -5,21 +5,24 @@ namespace litewave {
 
 static const char *const TAG = "litewave";
 
-// Global pointer for C callback trampolines
 static LitewaveComponent *g_litewave = nullptr;
 
-// C callback trampolines required by esp_ieee802154 driver
+// Weak callbacks: if OpenThread is linked, its strong definitions win.
+// If no OpenThread, these provide the callback implementation.
 extern "C" {
 
+__attribute__((weak))
 void esp_ieee802154_transmit_done(const uint8_t *frame, const uint8_t *ack,
                                    esp_ieee802154_frame_info_t *ack_frame_info) {
     if (g_litewave) g_litewave->on_tx_done(true);
 }
 
+__attribute__((weak))
 void esp_ieee802154_transmit_failed(const uint8_t *frame, esp_ieee802154_tx_error_t error) {
     if (g_litewave) g_litewave->on_tx_done(false);
 }
 
+__attribute__((weak))
 void esp_ieee802154_receive_done(uint8_t *frame, esp_ieee802154_frame_info_t *frame_info) {
     if (g_litewave) {
         g_litewave->on_rx_done(frame, frame_info);
@@ -28,11 +31,11 @@ void esp_ieee802154_receive_done(uint8_t *frame, esp_ieee802154_frame_info_t *fr
     }
 }
 
-void esp_ieee802154_receive_failed(uint16_t error) {}
-void esp_ieee802154_transmit_sfd_done(uint8_t *frame) {}
-void esp_ieee802154_receive_sfd_done(void) {}
-void esp_ieee802154_ed_done(int8_t power) {}
-void esp_ieee802154_energy_detect_done(int8_t power) {}
+__attribute__((weak)) void esp_ieee802154_receive_failed(uint16_t error) {}
+__attribute__((weak)) void esp_ieee802154_transmit_sfd_done(uint8_t *frame) {}
+__attribute__((weak)) void esp_ieee802154_receive_sfd_done(void) {}
+__attribute__((weak)) void esp_ieee802154_ed_done(int8_t power) {}
+__attribute__((weak)) void esp_ieee802154_energy_detect_done(int8_t power) {}
 
 }  // extern "C"
 
@@ -41,11 +44,27 @@ void LitewaveComponent::setup() {
     tx_sem_ = xSemaphoreCreateBinary();
     rx_queue_ = xQueueCreate(16, sizeof(RxFrame));
 
-    esp_ieee802154_enable();
-    esp_ieee802154_set_channel(channel_);
-    esp_ieee802154_set_txpower(20);
-    esp_ieee802154_set_promiscuous(true);
-    esp_ieee802154_set_rx_when_idle(sniff_);
+    // Check if OpenThread has already initialized the radio
+    // by trying to get the current state. If it's already enabled,
+    // OpenThread owns the radio and we just piggyback on it for TX.
+    esp_ieee802154_state_t state = esp_ieee802154_get_state();
+    if (state != ESP_IEEE802154_RADIO_DISABLE) {
+        has_openthread_ = true;
+        ESP_LOGI(TAG, "OpenThread detected (radio state=%d), using coexistence mode", state);
+    } else {
+        has_openthread_ = false;
+        esp_ieee802154_enable();
+        esp_ieee802154_set_channel(channel_);
+        esp_ieee802154_set_txpower(20);
+        esp_ieee802154_set_promiscuous(true);
+        esp_ieee802154_set_rx_when_idle(sniff_);
+        ESP_LOGI(TAG, "Standalone mode, radio initialized");
+    }
+
+    if (sniff_ && has_openthread_) {
+        ESP_LOGW(TAG, "Sniff mode is not supported with OpenThread, disabling");
+        sniff_ = false;
+    }
 
     if (sniff_) {
         ESP_LOGI(TAG, "Sniff mode enabled on channel %d, PAN 0x%04X", channel_, pan_id_);
@@ -70,6 +89,7 @@ void LitewaveComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Channel: %d", channel_);
     ESP_LOGCONFIG(TAG, "  PAN ID: 0x%04X", pan_id_);
     ESP_LOGCONFIG(TAG, "  Sniff: %s", sniff_ ? "true" : "false");
+    ESP_LOGCONFIG(TAG, "  OpenThread coexistence: %s", has_openthread_ ? "yes" : "no");
     ESP_LOGCONFIG(TAG, "  Groups: %d", groups_.size());
     for (auto *group : groups_) {
         char token_hex[29];
@@ -83,31 +103,24 @@ void LitewaveComponent::dump_config() {
 void LitewaveComponent::send_on(LitewaveGroup *group) {
     ESP_LOGI(TAG, "Sending ON (seq=0x%02X)", group->get_on_sequence());
     transmit_command(group->get_on_sequence(), group->get_on_token());
-    if (sniff_) start_receive();
 }
 
 void LitewaveComponent::send_off(LitewaveGroup *group) {
     ESP_LOGI(TAG, "Sending OFF (seq=0x%02X)", group->get_off_sequence());
     transmit_command(group->get_off_sequence(), group->get_off_token());
-    if (sniff_) start_receive();
 }
 
 void LitewaveComponent::build_litewave_frame(uint8_t *buf, uint8_t *len,
                                                uint8_t seq, uint16_t dst,
                                                const uint8_t *token) {
     uint8_t i = 0;
-    // FCF
     buf[i++] = LITEWAVE_FCF_LO;
     buf[i++] = LITEWAVE_FCF_HI;
-    // Sequence number
     buf[i++] = seq;
-    // PAN ID (little-endian)
     buf[i++] = pan_id_ & 0xFF;
     buf[i++] = (pan_id_ >> 8) & 0xFF;
-    // Destination address (little-endian)
     buf[i++] = dst & 0xFF;
     buf[i++] = (dst >> 8) & 0xFF;
-    // Payload: TTL + cmd_type + 14-byte token + 2 trailing bytes
     buf[i++] = 0x09;  // TTL
     buf[i++] = 0x00;  // Command type
     memcpy(&buf[i], token, LITEWAVE_TOKEN_LEN);
@@ -122,24 +135,54 @@ void LitewaveComponent::transmit_command(uint8_t seq, const uint8_t *token) {
     uint8_t frame_len;
     build_litewave_frame(frame, &frame_len, seq, LITEWAVE_DST_MULTICAST, token);
 
-    esp_ieee802154_set_channel(channel_);
+    uint8_t saved_channel = 0;
+    if (has_openthread_) {
+        // Save OpenThread's channel, switch to Litewave channel
+        saved_channel = esp_ieee802154_get_channel();
+        if (saved_channel != channel_) {
+            esp_ieee802154_set_channel(channel_);
+        }
+    } else {
+        esp_ieee802154_set_channel(channel_);
+    }
 
     for (int r = 0; r < LITEWAVE_TX_REPEATS; r++) {
-        if (!transmit_frame(frame, frame_len)) {
-            ESP_LOGW(TAG, "TX failed on repeat %d", r);
-        }
+        transmit_frame(frame, frame_len);
         if (r < LITEWAVE_TX_REPEATS - 1) {
             vTaskDelay(pdMS_TO_TICKS(LITEWAVE_TX_DELAY_MS));
         }
     }
+
+    if (has_openthread_) {
+        // Restore OpenThread's channel and restart RX
+        if (saved_channel != 0 && saved_channel != channel_) {
+            esp_ieee802154_set_channel(saved_channel);
+        }
+        esp_ieee802154_receive();
+    } else if (sniff_) {
+        start_receive();
+    }
 }
 
 bool LitewaveComponent::transmit_frame(const uint8_t *frame_data, uint8_t frame_len) {
-    // esp_ieee802154_transmit expects: buf[0] = length, buf[1..N] = MPDU
     uint8_t tx_buf[LITEWAVE_MAX_FRAME_LEN + 1];
     tx_buf[0] = frame_len;
     memcpy(&tx_buf[1], frame_data, frame_len);
 
+    if (has_openthread_) {
+        // With OpenThread, we can't use our callback (OpenThread's wins).
+        // Fire-and-forget: transmit and wait a fixed time for completion.
+        // A 25-byte frame at 250 kbps takes ~1ms on air.
+        esp_err_t err = esp_ieee802154_transmit(tx_buf, false);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_ieee802154_transmit failed: %d", err);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));  // Wait for TX to complete
+        return true;
+    }
+
+    // Standalone mode: use semaphore callback
     tx_ok_ = false;
     esp_err_t err = esp_ieee802154_transmit(tx_buf, false);
     if (err != ESP_OK) {
@@ -151,7 +194,6 @@ bool LitewaveComponent::transmit_frame(const uint8_t *frame_data, uint8_t frame_
         ESP_LOGW(TAG, "TX timeout");
         return false;
     }
-
     return tx_ok_;
 }
 
@@ -179,28 +221,20 @@ void LitewaveComponent::on_rx_done(uint8_t *frame, esp_ieee802154_frame_info_t *
 }
 
 void LitewaveComponent::process_rx_frame(const RxFrame &frame) {
-    // Minimum: FCF(2) + seq(1) + PAN(2) + dst(2) + payload(18) = 25 bytes
     if (frame.len < 25) return;
-
-    // Check FCF
     if (frame.data[0] != LITEWAVE_FCF_LO || frame.data[1] != LITEWAVE_FCF_HI) return;
 
-    // Check PAN ID
     uint16_t pan = frame.data[3] | (frame.data[4] << 8);
     if (pan != pan_id_) return;
 
-    // Check destination is multicast (0xFFF0) — filter out broadcast dupes
     uint16_t dst = frame.data[5] | (frame.data[6] << 8);
     if (dst != LITEWAVE_DST_MULTICAST) return;
 
-    // Extract payload
     const uint8_t *payload = &frame.data[7];
     uint8_t payload_len = frame.len - 7;
 
-    // We want 18-byte payloads with byte[1] == 0x00 (the standard ON/OFF command)
     if (payload_len != 18 || payload[1] != 0x00) return;
 
-    // Only log the first frame of a burst (highest TTL)
     uint8_t ttl = payload[0];
     if (ttl != 0x09) return;
 
