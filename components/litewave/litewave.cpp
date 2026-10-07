@@ -44,20 +44,25 @@ void LitewaveComponent::setup() {
     tx_sem_ = xSemaphoreCreateBinary();
     rx_queue_ = xQueueCreate(16, sizeof(RxFrame));
 
-    // Initialize the 802.15.4 radio subsystem.
+    // Try to initialize the 802.15.4 radio. If it fails, OpenThread
+    // already owns the radio and we piggyback on it for TX.
     esp_err_t err = esp_ieee802154_enable();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ieee802154_enable() failed: %s (%d)", esp_err_to_name(err), err);
-        mark_failed();
-        return;
+    if (err == ESP_OK) {
+        has_openthread_ = false;
+        esp_ieee802154_set_channel(channel_);
+        esp_ieee802154_set_txpower(20);
+        esp_ieee802154_set_promiscuous(true);
+        esp_ieee802154_set_rx_when_idle(sniff_);
+        ESP_LOGI(TAG, "Standalone mode, channel %d", channel_);
+    } else {
+        has_openthread_ = true;
+        ESP_LOGI(TAG, "OpenThread detected (enable returned %d), using coexistence mode", err);
     }
-    ESP_LOGI(TAG, "802.15.4 radio enabled successfully");
 
-    esp_ieee802154_set_channel(channel_);
-    esp_ieee802154_set_txpower(20);
-    esp_ieee802154_set_promiscuous(true);
-    esp_ieee802154_set_rx_when_idle(sniff_);
-    ESP_LOGI(TAG, "Standalone mode, channel %d", channel_);
+    if (sniff_ && has_openthread_) {
+        ESP_LOGW(TAG, "Sniff mode not supported with OpenThread, disabling");
+        sniff_ = false;
+    }
 
     if (sniff_) {
         ESP_LOGI(TAG, "Sniff mode enabled on channel %d, PAN 0x%04X", channel_, pan_id_);
@@ -82,6 +87,7 @@ void LitewaveComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  Channel: %d", channel_);
     ESP_LOGCONFIG(TAG, "  PAN ID: 0x%04X", pan_id_);
     ESP_LOGCONFIG(TAG, "  Sniff: %s", sniff_ ? "true" : "false");
+    ESP_LOGCONFIG(TAG, "  OpenThread coexistence: %s", has_openthread_ ? "yes" : "no");
     ESP_LOGCONFIG(TAG, "  Groups: %d", groups_.size());
     for (auto *group : groups_) {
         char token_hex[29];
@@ -127,7 +133,15 @@ void LitewaveComponent::transmit_command(uint8_t seq, const uint8_t *token) {
     uint8_t frame_len;
     build_litewave_frame(frame, &frame_len, seq, LITEWAVE_DST_MULTICAST, token);
 
-    esp_ieee802154_set_channel(channel_);
+    uint8_t saved_channel = 0;
+    if (has_openthread_) {
+        saved_channel = esp_ieee802154_get_channel();
+        if (saved_channel != channel_) {
+            esp_ieee802154_set_channel(channel_);
+        }
+    } else {
+        esp_ieee802154_set_channel(channel_);
+    }
 
     for (int r = 0; r < LITEWAVE_TX_REPEATS; r++) {
         transmit_frame(frame, frame_len);
@@ -136,7 +150,12 @@ void LitewaveComponent::transmit_command(uint8_t seq, const uint8_t *token) {
         }
     }
 
-    if (sniff_) {
+    if (has_openthread_) {
+        if (saved_channel != 0 && saved_channel != channel_) {
+            esp_ieee802154_set_channel(saved_channel);
+        }
+        esp_ieee802154_receive();
+    } else if (sniff_) {
         start_receive();
     }
 }
@@ -146,6 +165,18 @@ bool LitewaveComponent::transmit_frame(const uint8_t *frame_data, uint8_t frame_
     tx_buf[0] = frame_len;
     memcpy(&tx_buf[1], frame_data, frame_len);
 
+    if (has_openthread_) {
+        // OpenThread owns the callbacks, so fire-and-forget with a fixed wait.
+        esp_err_t err = esp_ieee802154_transmit(tx_buf, false);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_ieee802154_transmit failed: %d", err);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+        return true;
+    }
+
+    // Standalone mode: use semaphore callback.
     tx_ok_ = false;
     esp_err_t err = esp_ieee802154_transmit(tx_buf, false);
     if (err != ESP_OK) {
