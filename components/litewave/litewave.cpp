@@ -44,16 +44,18 @@ void LitewaveComponent::setup() {
     tx_sem_ = xSemaphoreCreateBinary();
     rx_queue_ = xQueueCreate(16, sizeof(RxFrame));
 
-    // Check if OpenThread has already initialized the radio
-    // by trying to get the current state. If it's already enabled,
-    // OpenThread owns the radio and we just piggyback on it for TX.
+    // Initialize the 802.15.4 radio driver first — calling get_state()
+    // before enable() crashes if the driver hasn't been initialized.
+    esp_ieee802154_enable();
+
+    // Now check if OpenThread has already configured the radio.
+    // If it's in a state beyond DISABLE/IDLE, OpenThread owns it.
     esp_ieee802154_state_t state = esp_ieee802154_get_state();
-    if (state != ESP_IEEE802154_RADIO_DISABLE) {
+    if (state == ESP_IEEE802154_RADIO_RECEIVE || state == ESP_IEEE802154_RADIO_TRANSMIT) {
         has_openthread_ = true;
         ESP_LOGI(TAG, "OpenThread detected (radio state=%d), using coexistence mode", state);
     } else {
         has_openthread_ = false;
-        esp_ieee802154_enable();
         esp_ieee802154_set_channel(channel_);
         esp_ieee802154_set_txpower(20);
         esp_ieee802154_set_promiscuous(true);
