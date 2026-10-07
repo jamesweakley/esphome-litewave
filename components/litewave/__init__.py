@@ -103,6 +103,7 @@ async def litewave_send_off_to_code(config, action_id, template_arg, args):
 async def to_code(config):
     esp32.include_builtin_idf_component("ieee802154")
     esp32.add_idf_sdkconfig_option("CONFIG_IEEE802154_ENABLED", True)
+    esp32.add_idf_sdkconfig_option("CONFIG_IEEE802154_RX_BUFFER_SIZE", 20)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
