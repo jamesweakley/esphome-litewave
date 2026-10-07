@@ -14,9 +14,7 @@ CONF_PAN_ID = "pan_id"
 CONF_SNIFF = "sniff"
 CONF_GROUPS = "groups"
 CONF_GROUP_ID = "group"
-CONF_ON_SEQUENCE = "on_sequence"
 CONF_ON_TOKEN = "on_token"
-CONF_OFF_SEQUENCE = "off_sequence"
 CONF_OFF_TOKEN = "off_token"
 
 litewave_ns = cg.esphome_ns.namespace("litewave")
@@ -42,9 +40,7 @@ def validate_token(value):
 GROUP_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ID): cv.declare_id(LitewaveGroup),
-        cv.Required(CONF_ON_SEQUENCE): cv.hex_uint8_t,
         cv.Required(CONF_ON_TOKEN): validate_token,
-        cv.Required(CONF_OFF_SEQUENCE): cv.hex_uint8_t,
         cv.Required(CONF_OFF_TOKEN): validate_token,
     }
 )
@@ -126,9 +122,7 @@ async def to_code(config):
         cg.add_global(cg.RawExpression(f"static const uint8_t {off_arr_name}[] = {{{off_arr_literal}}}"))
 
         group_var = cg.new_Pvariable(group_id)
-        cg.add(group_var.set_on_sequence(group_conf[CONF_ON_SEQUENCE]))
         cg.add(group_var.set_on_token(cg.RawExpression(on_arr_name)))
-        cg.add(group_var.set_off_sequence(group_conf[CONF_OFF_SEQUENCE]))
         cg.add(group_var.set_off_token(cg.RawExpression(off_arr_name)))
 
         cg.add(var.add_group(group_var))
