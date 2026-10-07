@@ -70,6 +70,7 @@ void LitewaveComponent::setup() {
         start_receive();
     }
 
+    ready_ = true;
     ESP_LOGI(TAG, "Initialized on channel %d, PAN 0x%04X, %d groups", channel_, pan_id_, groups_.size());
 }
 
@@ -129,6 +130,10 @@ void LitewaveComponent::build_litewave_frame(uint8_t *buf, uint8_t *len,
 }
 
 void LitewaveComponent::transmit_command(uint8_t seq, const uint8_t *token) {
+    if (!ready_) {
+        ESP_LOGW(TAG, "Ignoring transmit before setup complete");
+        return;
+    }
     uint8_t frame[32];
     uint8_t frame_len;
     build_litewave_frame(frame, &frame_len, seq, LITEWAVE_DST_MULTICAST, token);
