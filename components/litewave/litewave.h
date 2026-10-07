@@ -30,14 +30,20 @@ struct RxFrame {
 
 class LitewaveGroup {
  public:
+    void set_on_sequence(uint8_t seq) { on_seq_ = seq; }
     void set_on_token(const uint8_t token[LITEWAVE_TOKEN_LEN]) { memcpy(on_token_, token, LITEWAVE_TOKEN_LEN); }
+    void set_off_sequence(uint8_t seq) { off_seq_ = seq; }
     void set_off_token(const uint8_t token[LITEWAVE_TOKEN_LEN]) { memcpy(off_token_, token, LITEWAVE_TOKEN_LEN); }
 
+    uint8_t get_on_sequence() const { return on_seq_; }
     const uint8_t *get_on_token() const { return on_token_; }
+    uint8_t get_off_sequence() const { return off_seq_; }
     const uint8_t *get_off_token() const { return off_token_; }
 
  protected:
+    uint8_t on_seq_{0};
     uint8_t on_token_[LITEWAVE_TOKEN_LEN]{};
+    uint8_t off_seq_{0};
     uint8_t off_token_[LITEWAVE_TOKEN_LEN]{};
 };
 
@@ -61,9 +67,9 @@ class LitewaveComponent : public Component {
     void on_rx_done(uint8_t *frame, esp_ieee802154_frame_info_t *frame_info);
 
  protected:
-    void transmit_command(const uint8_t *token);
+    void transmit_command(uint8_t seq, const uint8_t *token);
     bool transmit_frame(const uint8_t *frame_data, uint8_t frame_len);
-    void build_litewave_frame(uint8_t *buf, uint8_t *len, uint16_t dst, const uint8_t *token);
+    void build_litewave_frame(uint8_t *buf, uint8_t *len, uint8_t seq, uint16_t dst, const uint8_t *token);
     void start_receive();
     void process_rx_frame(const RxFrame &frame);
 
@@ -72,7 +78,6 @@ class LitewaveComponent : public Component {
     bool sniff_{false};
     bool has_openthread_{false};
     bool ready_{false};
-    uint8_t seq_{0};
     std::vector<LitewaveGroup *> groups_;
 
     SemaphoreHandle_t tx_sem_{nullptr};

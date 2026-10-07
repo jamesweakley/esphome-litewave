@@ -95,27 +95,27 @@ void LitewaveComponent::dump_config() {
         for (int i = 0; i < LITEWAVE_TOKEN_LEN; i++) {
             sprintf(&token_hex[i * 2], "%02X", group->get_on_token()[i]);
         }
-        ESP_LOGCONFIG(TAG, "    ON token=%s", token_hex);
+        ESP_LOGCONFIG(TAG, "    ON seq=0x%02X token=%s", group->get_on_sequence(), token_hex);
     }
 }
 
 void LitewaveComponent::send_on(LitewaveGroup *group) {
-    ESP_LOGI(TAG, "Sending ON");
-    transmit_command(group->get_on_token());
+    ESP_LOGI(TAG, "Sending ON (seq=0x%02X)", group->get_on_sequence());
+    transmit_command(group->get_on_sequence(), group->get_on_token());
 }
 
 void LitewaveComponent::send_off(LitewaveGroup *group) {
-    ESP_LOGI(TAG, "Sending OFF");
-    transmit_command(group->get_off_token());
+    ESP_LOGI(TAG, "Sending OFF (seq=0x%02X)", group->get_off_sequence());
+    transmit_command(group->get_off_sequence(), group->get_off_token());
 }
 
 void LitewaveComponent::build_litewave_frame(uint8_t *buf, uint8_t *len,
-                                               uint16_t dst,
+                                               uint8_t seq, uint16_t dst,
                                                const uint8_t *token) {
     uint8_t i = 0;
     buf[i++] = LITEWAVE_FCF_LO;
     buf[i++] = LITEWAVE_FCF_HI;
-    buf[i++] = seq_++;
+    buf[i++] = seq;
     buf[i++] = pan_id_ & 0xFF;
     buf[i++] = (pan_id_ >> 8) & 0xFF;
     buf[i++] = dst & 0xFF;
@@ -129,14 +129,14 @@ void LitewaveComponent::build_litewave_frame(uint8_t *buf, uint8_t *len,
     *len = i;
 }
 
-void LitewaveComponent::transmit_command(const uint8_t *token) {
+void LitewaveComponent::transmit_command(uint8_t seq, const uint8_t *token) {
     if (!ready_) {
         ESP_LOGW(TAG, "Ignoring transmit before setup complete");
         return;
     }
     uint8_t frame[32];
     uint8_t frame_len;
-    build_litewave_frame(frame, &frame_len, LITEWAVE_DST_MULTICAST, token);
+    build_litewave_frame(frame, &frame_len, seq, LITEWAVE_DST_MULTICAST, token);
 
     uint8_t saved_channel = 0;
     if (has_openthread_) {
@@ -248,10 +248,13 @@ void LitewaveComponent::process_rx_frame(const RxFrame &frame) {
 
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "=== Litewave command captured (rssi=%d) ===", frame.rssi);
+    ESP_LOGI(TAG, "  sequence: 0x%02X", seq);
     ESP_LOGI(TAG, "  token: \"%s\"", token_hex);
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "Add to your YAML group config:");
+    ESP_LOGI(TAG, "  on_sequence: 0x%02X     # if this was an ON press", seq);
     ESP_LOGI(TAG, "  on_token: \"%s\"   # if this was an ON press", token_hex);
+    ESP_LOGI(TAG, "  off_sequence: 0x%02X    # if this was an OFF press", seq);
     ESP_LOGI(TAG, "  off_token: \"%s\"  # if this was an OFF press", token_hex);
     ESP_LOGI(TAG, "===");
 }
