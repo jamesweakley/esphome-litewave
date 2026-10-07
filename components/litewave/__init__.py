@@ -100,6 +100,8 @@ async def to_code(config):
     esp32.include_builtin_idf_component("ieee802154")
     esp32.add_idf_sdkconfig_option("CONFIG_IEEE802154_ENABLED", True)
     esp32.add_idf_sdkconfig_option("CONFIG_IEEE802154_RX_BUFFER_SIZE", 20)
+    esp32.add_idf_sdkconfig_option("CONFIG_ESP_COEX_ENABLED", True)
+    esp32.add_idf_sdkconfig_option("CONFIG_ESP_COEX_SW_COEXIST_ENABLE", True)
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

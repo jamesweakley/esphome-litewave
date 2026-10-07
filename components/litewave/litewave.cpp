@@ -149,7 +149,8 @@ void LitewaveComponent::transmit_command(const uint8_t *token) {
     }
 
     for (int r = 0; r < LITEWAVE_TX_REPEATS; r++) {
-        transmit_frame(frame, frame_len);
+        bool ok = transmit_frame(frame, frame_len);
+        ESP_LOGD(TAG, "TX repeat %d/%d: %s", r + 1, LITEWAVE_TX_REPEATS, ok ? "ok" : "FAILED");
         if (r < LITEWAVE_TX_REPEATS - 1) {
             vTaskDelay(pdMS_TO_TICKS(LITEWAVE_TX_DELAY_MS));
         }
