@@ -22,8 +22,17 @@ wifi:
   password: !secret wifi_password
 
 # Litewave — raw 802.15.4 TX for Nanoleaf control
-# Step 1: Set sniff: true, flash, press Sense+ ON and OFF, copy tokens from logs
-# Step 2: Fill in group tokens below, set sniff: false, reflash
+#
+# Setup workflow:
+#   1. Pick a shared secret from token_catalog.yaml (or generate your own)
+#   2. Fill in the group config below with the catalog tokens
+#   3. Flash this config to your ESP32-C6
+#   4. Use the litewave.provision_light action from HA to push the secret
+#      to each light (or use tools/provision_v3.py manually)
+#
+# Sniff mode: set sniff: true to capture tokens from a Sense+ switch.
+# This is only needed if you're generating your own secrets instead of
+# using the pre-generated catalog.
 litewave:
   channel: 26
   pan_id: 0x3B71
@@ -31,10 +40,19 @@ litewave:
 
   groups:
     - id: living_room
+      shared_secret: "0x01"  # auto-padded to 54 bytes (or full 108 hex chars)
       on_sequence: 0xFB
       on_token: "949B16B63E32024A9DD73E03604D"
       off_sequence: 0xFD
       off_token: "9ACC50F8E109757695C384C4EA74"
+      # dim_plus_sequence: 0x03
+      # dim_plus_token: "..."
+      # dim_minus_sequence: 0x05
+      # dim_minus_token: "..."
+      lights:
+        - name: "Living Room DL 1"
+          host: "192.168.1.50"
+          pairing_code: "1640-700-5590"
 
 # Physical button
 binary_sensor:
@@ -70,3 +88,13 @@ light:
     on_turn_off:
       - litewave.send_off:
           group: living_room
+
+# Provision a light from Home Assistant (push shared secret to the light)
+# Call esphome.litewave_switch_provision_living_room_0 from HA
+button:
+  - platform: template
+    name: "Provision Living Room DL 1"
+    on_press:
+      - litewave.provision_light:
+          group: living_room
+          light_index: 0

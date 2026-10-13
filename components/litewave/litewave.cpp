@@ -1,4 +1,5 @@
 #include "litewave.h"
+#include "ltpdu_v3.h"
 
 namespace esphome {
 namespace litewave {
@@ -96,6 +97,29 @@ void LitewaveComponent::dump_config() {
             sprintf(&token_hex[i * 2], "%02X", group->get_on_token()[i]);
         }
         ESP_LOGCONFIG(TAG, "    ON seq=0x%02X token=%s", group->get_on_sequence(), token_hex);
+        for (int i = 0; i < LITEWAVE_TOKEN_LEN; i++) {
+            sprintf(&token_hex[i * 2], "%02X", group->get_off_token()[i]);
+        }
+        ESP_LOGCONFIG(TAG, "    OFF seq=0x%02X token=%s", group->get_off_sequence(), token_hex);
+        if (group->has_dim_plus()) {
+            for (int i = 0; i < LITEWAVE_TOKEN_LEN; i++) {
+                sprintf(&token_hex[i * 2], "%02X", group->get_dim_plus_token()[i]);
+            }
+            ESP_LOGCONFIG(TAG, "    DIM+ seq=0x%02X token=%s", group->get_dim_plus_sequence(), token_hex);
+        }
+        if (group->has_dim_minus()) {
+            for (int i = 0; i < LITEWAVE_TOKEN_LEN; i++) {
+                sprintf(&token_hex[i * 2], "%02X", group->get_dim_minus_token()[i]);
+            }
+            ESP_LOGCONFIG(TAG, "    DIM- seq=0x%02X token=%s", group->get_dim_minus_sequence(), token_hex);
+        }
+        if (group->get_shared_secret_len() > 0) {
+            ESP_LOGCONFIG(TAG, "    Shared secret: %d bytes", group->get_shared_secret_len());
+        }
+        ESP_LOGCONFIG(TAG, "    Lights: %d", group->get_lights().size());
+        for (const auto &light : group->get_lights()) {
+            ESP_LOGCONFIG(TAG, "      %s @ %s", light.name.c_str(), light.host.c_str());
+        }
     }
 }
 
@@ -107,6 +131,51 @@ void LitewaveComponent::send_on(LitewaveGroup *group) {
 void LitewaveComponent::send_off(LitewaveGroup *group) {
     ESP_LOGI(TAG, "Sending OFF (seq=0x%02X)", group->get_off_sequence());
     transmit_command(group->get_off_sequence(), group->get_off_token());
+}
+
+void LitewaveComponent::send_dim_plus(LitewaveGroup *group) {
+    if (!group->has_dim_plus()) {
+        ESP_LOGW(TAG, "DIM+ not configured for this group");
+        return;
+    }
+    ESP_LOGI(TAG, "Sending DIM+ (seq=0x%02X)", group->get_dim_plus_sequence());
+    transmit_command(group->get_dim_plus_sequence(), group->get_dim_plus_token());
+}
+
+void LitewaveComponent::send_dim_minus(LitewaveGroup *group) {
+    if (!group->has_dim_minus()) {
+        ESP_LOGW(TAG, "DIM- not configured for this group");
+        return;
+    }
+    ESP_LOGI(TAG, "Sending DIM- (seq=0x%02X)", group->get_dim_minus_sequence());
+    transmit_command(group->get_dim_minus_sequence(), group->get_dim_minus_token());
+}
+
+void LitewaveComponent::provision_light(LitewaveGroup *group, int light_index) {
+    if (light_index < 0 || light_index >= (int) group->get_lights().size()) {
+        ESP_LOGE(TAG, "Light index %d out of range (group has %d lights)",
+                 light_index, group->get_lights().size());
+        return;
+    }
+    if (group->get_shared_secret_len() == 0) {
+        ESP_LOGE(TAG, "No shared_secret configured for this group");
+        return;
+    }
+    const auto &light = group->get_lights()[light_index];
+    ESP_LOGI(TAG, "Provisioning light '%s' at %s", light.name.c_str(), light.host.c_str());
+
+    bool ok = provision_light_sync(
+        light.host,
+        light.pairing_code,
+        light.name,
+        group->get_shared_secret(),
+        group->get_shared_secret_len()
+    );
+    if (ok) {
+        ESP_LOGI(TAG, "Provisioning succeeded for '%s'", light.name.c_str());
+    } else {
+        ESP_LOGE(TAG, "Provisioning FAILED for '%s'", light.name.c_str());
+    }
 }
 
 void LitewaveComponent::build_litewave_frame(uint8_t *buf, uint8_t *len,
