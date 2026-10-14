@@ -98,6 +98,7 @@ class LitewaveComponent : public Component {
 
     void set_channel(uint8_t ch) { channel_ = ch; }
     void set_pan_id(uint16_t pan) { pan_id_ = pan; }
+    void set_admin_key(uint16_t key) { admin_key_ = key; }
     void set_sniff(bool sniff) { sniff_ = sniff; }
     void add_group(LitewaveGroup *group) { groups_.push_back(group); }
 
@@ -119,8 +120,9 @@ class LitewaveComponent : public Component {
     void start_receive();
     void process_rx_frame(const RxFrame &frame);
 
-    uint8_t channel_{26};
-    uint16_t pan_id_{0x3B71};
+    uint8_t channel_{0};
+    uint16_t pan_id_{0};
+    uint16_t admin_key_{0};
     bool sniff_{false};
     bool has_openthread_{false};
     bool ready_{false};

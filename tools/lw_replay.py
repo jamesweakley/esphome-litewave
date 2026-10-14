@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Litewave Token Replay — send ON/OFF with tokens from the command line.
+Litewave Token Replay — send ON/OFF/DIM with tokens from the command line.
 
 Usage:
     # Replay ON:
@@ -9,22 +9,49 @@ Usage:
     # Replay OFF:
     python3 lw_replay.py off 0xFD 9ACC50F8E109757695C384C4EA74
 
-    # Arguments: command, sequence_number, 14-byte_token_hex
+    # Replay across all 802.15.4 channels (11-26) to find the light's channel:
+    python3 lw_replay.py on 0xFB 949B16B63E32024A9DD73E03604D --all-channels
 """
 
 import argparse
+import glob
 import struct
 import sys
 import time
 
-import serial
+try:
+    import serial
+    import serial.tools.list_ports
+except ImportError:
+    print("Error: pyserial is required. Run: pip install pyserial", file=sys.stderr)
+    sys.exit(1)
 
 SYNC_BYTE = 0xBB
-DEFAULT_CHANNEL = 26
-DEFAULT_PAN = 0x3B71
 MULTICAST_DST = 0xFFF0
 TX_REPEATS = 5
 TX_DELAY_MS = 20
+
+
+def select_serial_port(explicit_port=None):
+    if explicit_port:
+        return explicit_port
+    try:
+        comports = serial.tools.list_ports.comports()
+        candidates = [p for p in comports if "bluetooth" not in p.device.lower() and "debug-console" not in p.device.lower()]
+    except Exception:
+        paths = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*") + glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
+        candidates = [type("Port", (), {"device": p, "description": "Serial Port"})() for p in paths]
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0].device
+    print("Multiple serial ports found:")
+    for idx, p in enumerate(candidates):
+        print(f"  [{idx + 1}] {p.device} ({p.description})")
+    choice = input(f"Select port (1-{len(candidates)}) [1]: ").strip()
+    idx = int(choice) - 1 if choice.isdigit() else 0
+    return candidates[idx].device
 
 
 def build_litewave_frame(seq, pan_id, dst, token_bytes):
@@ -60,22 +87,30 @@ def send_frame(ser, channel, frame_data, repeats=1, delay_ms=20):
 
 def main():
     parser = argparse.ArgumentParser(description="Litewave Token Replay")
-    parser.add_argument("command", choices=["on", "off"],
-                        help="on or off")
+    parser.add_argument("command", choices=["on", "off", "dim_up", "dim_down", "dim+", "dim-"],
+                        help="command action")
     parser.add_argument("sequence", type=lambda x: int(x, 0),
-                        help="Sequence number (e.g., 0xFB)")
+                        help="Sequence number (e.g., 0xFB or 251)")
     parser.add_argument("token",
                         help="14-byte token as 28 hex chars (e.g., 949B16B63E32024A9DD73E03604D)")
-    parser.add_argument("--port", default="/dev/cu.usbmodem1101")
+    parser.add_argument("--port", default=None, help="Serial port (auto-detected if omitted)")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--channel", type=int, default=DEFAULT_CHANNEL)
-    parser.add_argument("--pan", type=lambda x: int(x, 0), default=DEFAULT_PAN)
+    parser.add_argument("--channel", type=int, default=26, help="Radio channel (11-26, default 26)")
+    parser.add_argument("--all-channels", action="store_true",
+                        help="Sweep across all channels 11-26 (useful if light Thread channel is unknown)")
+    parser.add_argument("--pan", type=lambda x: int(x, 0), required=True,
+                        help="2-byte PAN ID (e.g. 0x1234 or from Nanoleaf cloud/app)")
     parser.add_argument("--dst", type=lambda x: int(x, 0), default=MULTICAST_DST,
                         help="Destination address (default: 0xFFF0 multicast)")
     parser.add_argument("--repeats", type=int, default=TX_REPEATS)
     args = parser.parse_args()
 
-    token_hex = args.token.replace(" ", "").replace(":", "")
+    port = select_serial_port(args.port)
+    if not port:
+        print("Error: No serial port found. Plug in ESP32-C6 transmitter or specify --port.", file=sys.stderr)
+        sys.exit(1)
+
+    token_hex = args.token.replace(" ", "").replace(":", "").replace("0x", "")
     if len(token_hex) != 28:
         print(f"Error: token must be 14 bytes (28 hex chars), got {len(token_hex)}", file=sys.stderr)
         sys.exit(1)
@@ -83,17 +118,25 @@ def main():
 
     frame = build_litewave_frame(args.sequence, args.pan, args.dst, token_bytes)
 
-    print(f"Sending {args.command.upper()}: seq=0x{args.sequence:02X} dst=0x{args.dst:04X} token={token_hex}", file=sys.stderr)
-    print(f"  Frame ({len(frame)}b): {frame.hex()}", file=sys.stderr)
+    print(f"Port: {port}")
+    print(f"Sending {args.command.upper()}: seq=0x{args.sequence:02X} dst=0x{args.dst:04X} token={token_hex}")
+    print(f"  Frame ({len(frame)}b): {frame.hex()}")
 
-    ser = serial.Serial(args.port, args.baud, timeout=2)
+    ser = serial.Serial(port, args.baud, timeout=2)
     time.sleep(0.5)
 
-    resp = send_frame(ser, args.channel, frame, repeats=args.repeats, delay_ms=TX_DELAY_MS)
-    print(f"  TX result: {resp}", file=sys.stderr)
+    if args.all_channels:
+        print("Sweeping across channels 11-26...")
+        for ch in range(11, 27):
+            resp = send_frame(ser, ch, frame, repeats=args.repeats, delay_ms=TX_DELAY_MS)
+            print(f"  CH {ch:2d} -> TX result: {resp}")
+            time.sleep(0.1)
+    else:
+        resp = send_frame(ser, args.channel, frame, repeats=args.repeats, delay_ms=TX_DELAY_MS)
+        print(f"  Channel {args.channel} -> TX result: {resp}")
 
     ser.close()
-    print("Done.", file=sys.stderr)
+    print("Done.")
 
 
 if __name__ == "__main__":

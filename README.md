@@ -1,114 +1,229 @@
 # esphome-litewave
 
-ESPHome external component for controlling Nanoleaf lights via the Litewave protocol over raw IEEE 802.15.4.
+ESPHome external component for controlling Nanoleaf lights via the proprietary **Litewave protocol** over raw IEEE 802.15.4 broadcasts.
 
-Works on ESP32-C6 and ESP32-H2 (any ESP32 with an 802.15.4 radio). Connects to Home Assistant over WiFi and sends Litewave commands directly to Nanoleaf downlights, bulbs, and strips — no Sense+ switch needed after initial token capture.
+Works on **ESP32-C6** and **ESP32-H2** (or any ESP32 with an 802.15.4 radio). Sends instant Litewave commands directly to Nanoleaf Essentials Downlights (NL65), bulbs, and strips — working immediately on boot with zero WiFi or Thread dependency.
+
+---
+
+## How It Works: Cryptographic Room Isolation
+
+Nanoleaf Sense+ switches and downlights authenticate commands using a 54-byte shared secret (`sp/ss`).
+
+By assigning different shared secrets to different rooms (e.g. `0x01` for Living Room, `0x02` for Kitchen), lights in each room respond exclusively to their assigned room's tokens. This achieves **independent per-room control** across any number of rooms using only a single physical Sense+ switch during setup (or by reusing pre-cataloged token sets).
+
+```
+   ESP32-C6 / ESP32-H2 (ESPHome)
+              │
+              │  Raw 802.15.4 Broadcast (Channel 26, PAN 0x3411)
+              ▼
+   ┌───────────────────────┬───────────────────────┐
+   │  Living Room (SS: 01) │   Kitchen (SS: 02)    │
+   │  Responds to Room 1   │   Responds to Room 2  │
+   │  Tokens only          │   Tokens only         │
+   └───────────────────────┴───────────────────────┘
+```
+
+---
 
 ## Requirements
 
-- ESP32-C6 or ESP32-H2 board
-- ESPHome with ESP-IDF framework
-- Nanoleaf lights in a Litewave control group (set up via the Nanoleaf app + Sense+ switch)
-- The Sense+ switch for one-time token capture
+- **ESP32-C6** or **ESP32-H2** development board
+- ESPHome with `framework: type: esp-idf`
+- Python 3.9+ with tool requirements installed:
+  ```bash
+  pip install -r tools/requirements.txt
+  ```
 
-## Quick Start
+---
 
-### 1. Set up the control group
+## Setup Workflow
 
-In the Nanoleaf app, create a control group and add your lights. For reliable setup, pair lights with Matter (Home Assistant) first, then add them to the Nanoleaf app.
+Setting up a room consists of three simple steps:
 
-### 2. Capture tokens
+### Step 1: Obtain Tokens & Shared Secret
 
-Add the component to your ESPHome config with sniff mode enabled:
+Choose one of two approaches:
+
+#### Option A: Use the Pre-Generated Token Catalog (No Switch Needed)
+Pick an entry from [`token_catalog.yaml`](token_catalog.yaml). Each entry contains a deterministic shared secret (e.g. `0x00`, `0x01`, `0x02`...) and pre-captured ON, OFF, DIM+, and DIM- tokens.
+
+#### Option B: Capture Custom Tokens with a Sense+ Switch
+Run the unified capture CLI tool. It writes your chosen shared secret to the Sense+ switch via BLE and captures all 4 button presses through the ESP32-C6 sniffer:
+
+```bash
+# 1. Put switch in BLE pairing mode: hold ON + OFF for 3 seconds (white LED flashes)
+# 2. Run capture tool:
+./tools/capture_and_provision.py \
+    --switch-name "Nanoleaf Wireless SW 123" \
+    --switch-code "1234-567-abcd" \
+    --secret 0x01 \
+    --group-name living_room
+```
+
+*(Note: If the ESP32 currently has transmitter firmware flashed, the tool will automatically offer to flash the sniffer firmware for you).*
+
+---
+
+### Step 2: Provision Lights with the Shared Secret
+
+Push the shared secret to each light in the room using `tools/provision_v3.py`. Lights are discovered automatically via local mDNS.
+
+Look at the back of each downlight for its **3-character hardware ID** (e.g. `789` or `1D9`):
+
+#### Method 1: Cloud Token (Recommended)
+Reuses existing authentication tokens from your Nanoleaf Cloud account and automatically authorizes all Sense+ switches found in your home:
+
+```bash
+# Set your Nanoleaf account credentials in environment (or pass via flags / prompt)
+export NANOLEAF_EMAIL="user@example.com"
+export NANOLEAF_PASSWORD="your_password"
+
+# Provision light '789' with shared secret 0x01 (auto-discovers switch ACL from cloud):
+python3 tools/provision_v3.py --id 789 --secret 0x01
+
+# Provision multiple lights in the room at once:
+python3 tools/provision_v3.py --id 789,1D9 --secret 0x01
+```
+
+#### Method 2: Matter Pairing Code (Fallback)
+Uses the 11-digit Matter setup code printed on the light, and optionally authorizes a specific switch by EUI:
+
+```bash
+python3 tools/provision_v3.py \
+    --session-method new_pairing \
+    --id 789 \
+    --code 1111-222-3333 \
+    --switch-eui e406bffffaabbccc \
+    --secret 0x01
+```
+
+#### Inspect Existing Configuration & ACL (Safe Read-Only)
+```bash
+python3 tools/provision_v3.py --id 789 --read-only
+```
+
+---
+
+### Step 3: Configure ESPHome
+
+Add the `litewave` component and group configuration to your ESPHome YAML:
 
 ```yaml
+esphome:
+  name: litewave-controller
+
+esp32:
+  variant: ESP32C6
+  board: esp32-c6-devkitm-1
+  framework:
+    type: esp-idf
+
 external_components:
   - source: github://jamesweakley/esphome-litewave
+    components: [litewave]
 
 litewave:
-  channel: 26
-  pan_id: 0x3B71
-  sniff: true
-```
+  channel: 26        # Your home radio channel (from nanoleaf_cloud.py or provision_v3.py)
+  pan_id: 0x1234     # Your home 2-byte PAN ID (from nanoleaf_cloud.py or provision_v3.py)
 
-Flash, then press the Sense+ ON button. Check the ESPHome logs for:
-
-```
-[I][litewave]: === Litewave command captured (rssi=-68) ===
-[I][litewave]:   sequence: 0xFB
-[I][litewave]:   token: "949B16B63E32024A9DD73E03604D"
-```
-
-Press the OFF button and note that sequence + token too.
-
-### 3. Configure groups
-
-```yaml
-litewave:
-  channel: 26
-  pan_id: 0x3B71
-  sniff: false
   groups:
     - id: living_room
+      shared_secret: "0x01"  # auto zero-padded to 54 bytes
       on_sequence: 0xFB
-      on_token: "949B16B63E32024A9DD73E03604D"
+      on_token: "949B16B63E32024A9DD73E032211"
       off_sequence: 0xFD
-      off_token: "9ACC50F8E109757695C384C4EA74"
-```
+      off_token: "9ACC50F8E209757295C384C4EA74"
+      dim_plus_sequence: 0x03
+      dim_plus_token: "08D15628B08D981A3F7CC3674681"
+      dim_minus_sequence: 0x05
+      dim_minus_token: "166BAA118582F3C3FF4D6B92298E"
+      lights:
+        - name: "Living Room DL 1"
+          host: "192.168.1.50"
+          pairing_code: "1640-700-5590"
 
-### 4. Wire up actions
-
-```yaml
-light:
-  - platform: binary
-    name: "Living Room Lights"
-    output: led_output
-    id: living_room_light
-    on_turn_on:
+# Wire actions to physical buttons, Home Assistant entities, or automations:
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO9
+      mode:
+        pullup: true
+        input: true
+      inverted: true
+    name: "Wall Switch Button"
+    on_press:
       - litewave.send_on:
           group: living_room
-    on_turn_off:
+    on_double_click:
       - litewave.send_off:
           group: living_room
+
+# Trigger light provisioning directly from Home Assistant
+button:
+  - platform: template
+    name: "Provision Living Room Light 1"
+    on_press:
+      - litewave.provision_light:
+          group: living_room
+          light_index: 0
 ```
 
-## Configuration
+---
 
-### `litewave` component
+## ESPHome Component Reference
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `channel` | int (11-26) | 26 | IEEE 802.15.4 channel |
-| `pan_id` | hex uint16 | 0x3B71 | Litewave PAN ID |
-| `sniff` | boolean | false | Enable promiscuous RX to capture tokens |
-| `groups` | list | [] | List of control group definitions |
+### `litewave` Component Options
 
-### Group config
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `channel` | integer (11–26) | | 802.15.4 radio channel (Litewave default is 26) |
+| `pan_id` | hex uint16 |  | Litewave PAN ID |
+| `sniff` | boolean | `false` | Enable promiscuous RX packet sniffer in logs |
+| `groups` | list | `[]` | List of room control group definitions |
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `id` | ID | Reference name for actions |
-| `on_sequence` | hex uint8 | 802.15.4 sequence number for ON command |
-| `on_token` | string | 14-byte hex token for ON command |
-| `off_sequence` | hex uint8 | 802.15.4 sequence number for OFF command |
-| `off_token` | string | 14-byte hex token for OFF command |
+### Group Schema
 
-### Actions
+| Option | Type | Required | Description |
+|---|---|---|---|
+| `id` | ID | Yes | Group identifier for action calls |
+| `shared_secret` | string / hex | Optional | Shared secret (e.g. `"0x01"` or 108 hex chars). Auto-padded to 54 bytes. |
+| `on_sequence` | hex uint8 | Yes | 802.15.4 sequence number for ON |
+| `on_token` | hex string (28 chars) | Yes | 14-byte captured ON token |
+| `off_sequence` | hex uint8 | Yes | 802.15.4 sequence number for OFF |
+| `off_token` | hex string (28 chars) | Yes | 14-byte captured OFF token |
+| `dim_plus_sequence` | hex uint8 | Optional | Sequence number for DIM+ (brightness up) |
+| `dim_plus_token` | hex string (28 chars) | Optional | 14-byte captured DIM+ token |
+| `dim_minus_sequence` | hex uint8 | Optional | Sequence number for DIM- (brightness down) |
+| `dim_minus_token` | hex string (28 chars) | Optional | 14-byte captured DIM- token |
+| `lights` | list | Optional | List of `{name, host, pairing_code}` for on-device provisioning |
 
-- `litewave.send_on` — send the ON command for a group
-- `litewave.send_off` — send the OFF command for a group
+### Available ESPHome Actions
 
-Both require `group:` parameter referencing a group ID.
+- `litewave.send_on: group: <group_id>` — Transmits ON command burst
+- `litewave.send_off: group: <group_id>` — Transmits OFF command burst
+- `litewave.send_dim_plus: group: <group_id>` — Transmits DIM+ brightness up command burst
+- `litewave.send_dim_minus: group: <group_id>` — Transmits DIM- brightness down command burst
+- `litewave.provision_light: group: <group_id>, light_index: <index>` — Runs on-device SRP-6a provisioning over UDP to push the group's `shared_secret` to the light.
 
-## How it works
+---
 
-Nanoleaf Litewave is a proprietary protocol running on standard IEEE 802.15.4 radio. It uses unencrypted broadcast/multicast frames with pre-shared command tokens that are provisioned during control group setup. This component replays those tokens to control the lights.
+## Tools Inventory
 
-Each command is sent as a 25-byte 802.15.4 data frame to the multicast address `0xFFF0` on the Litewave PAN, repeated 5 times for reliability. No acknowledgment is expected — it's fire-and-forget, same as the real Sense+ switch.
+| Script | Purpose |
+|---|---|
+| `tools/capture_and_provision.py` | Unified CLI: scans switches, writes shared secret via BLE, captures 4 buttons from sniffer, and manages sniffer firmware. |
+| `tools/provision_v3.py` | Provisions lights over mDNS using Cloud Tokens or Matter pairing codes. |
+| `tools/generate_catalog.py` | Automated batch capture tool for generating 100 sequential token catalog entries. |
+| `tools/nanoleaf_cloud.py` | Standalone CLI & module to query Nanoleaf Cloud API for device auth tokens. |
+| `tools/lw_replay.py` | Command-line token replay utility for testing against the transmitter firmware. |
+| `tools/firmware/sniffer/` | Pre-built binary and source for the ESP32-C6 promiscuous sniffer with 1s heartbeat. |
+| `tools/firmware/transmitter/` | Pre-built binary and source for the ESP32-C6 serial replay transmitter. |
 
-## Notes
+---
 
-- Tokens are per-control-group, not per-light. One capture covers all lights in a group.
-- Tokens change if you remove/re-add lights to a control group. Recapture if you modify the group.
-- The ESP32-C6 shares its 2.4 GHz radio between WiFi and 802.15.4. Brief Litewave TX bursts do not noticeably impact WiFi.
-- The `sniff` option should be disabled in production to avoid unnecessary radio RX.
+## License & Credits
+
+Reverse engineering and ESPHome implementation by James Weakley.
+Provided under the MIT License.

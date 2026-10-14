@@ -15,7 +15,6 @@ import time
 
 
 SYNC_BYTE = 0xAA
-LITEWAVE_PAN = 0x3B71
 LITEWAVE_DST = 0xFFF0
 
 
@@ -65,16 +64,10 @@ def read_frame(ser):
     return channel, rssi, lqi, frame_data
 
 
-def parse_litewave_frame(frame_data):
+def parse_litewave_frame(frame_data, target_pan=None):
     """
     Parse an 802.15.4 frame and extract Litewave token if it matches.
     Returns (dsn, token_hex) or None.
-    
-    Frame layout: FCF(2) + DSN(1) + dst_pan(2) + dst_addr(2) + payload...
-    Payload: TTL(1) + 0x00(1) + token(14) + trailer(2)
-    
-    The DSN (Data Sequence Number) is the value that changes per button press
-    and is what ESPHome needs as the "sequence" config value.
     """
     if len(frame_data) < 10:
         return None
@@ -115,7 +108,7 @@ def parse_litewave_frame(frame_data):
         return None
 
     # Check Litewave PAN and destination
-    if dst_pan != LITEWAVE_PAN:
+    if target_pan is not None and dst_pan != target_pan:
         return None
     if dst_mode == 2 and dst_addr != LITEWAVE_DST:
         return None
@@ -140,14 +133,10 @@ def parse_litewave_frame(frame_data):
     cmd_type = payload[1]
     token = payload[2:16]
 
-    # Sanity: cmd_type should be 0x00 for normal ON/OFF commands
-    if cmd_type != 0x00:
-        return None
-
     return dsn, token.hex().upper()
 
 
-def capture_command(ser, label, timeout=30, debug=False):
+def capture_command(ser, label, target_pan=None, timeout=30, debug=False):
     """
     Wait for a Litewave command, capturing the first frame of a burst.
     Returns (sequence, token_hex) or None.
@@ -174,7 +163,7 @@ def capture_command(ser, label, timeout=30, debug=False):
         if debug:
             print(f"    frame #{frame_count}: ch={channel} rssi={rssi} len={len(frame_data)} hex={frame_data.hex()}")
 
-        result = parse_litewave_frame(frame_data)
+        result = parse_litewave_frame(frame_data, target_pan=target_pan)
         if result is None:
             if debug and frame_count <= 20:
                 # Show why it was rejected
@@ -205,7 +194,8 @@ def capture_command(ser, label, timeout=30, debug=False):
         ser.reset_input_buffer()
 
     if not captured:
-        print(f"  ({frame_count} frames received, none matched Litewave PAN 0x{LITEWAVE_PAN:04X} dst 0x{LITEWAVE_DST:04X})")
+        pan_str = f"0x{target_pan:04X}" if target_pan else "any"
+        print(f"  ({frame_count} frames received, none matched Litewave PAN {pan_str} dst 0x{LITEWAVE_DST:04X})")
 
     return captured
 
@@ -214,6 +204,7 @@ def main():
     parser = argparse.ArgumentParser(description="Interactive Litewave token capture")
     parser.add_argument("--port", help="Serial port (auto-detected if omitted)")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default 115200)")
+    parser.add_argument("--pan-id", help="Filter by 2-byte PAN ID hex string (optional)")
     parser.add_argument("--group-name", default="room", help="ESPHome group name (default: room)")
     parser.add_argument("--debug", action="store_true", help="Show all received frames")
     args = parser.parse_args()
@@ -238,13 +229,14 @@ def main():
     # Flush any stale data
     time.sleep(0.5)
     ser.reset_input_buffer()
-    print(f"  Port open. Sniffer listens on channel 26 (no output until frames arrive).")
+    target_pan = int(args.pan_id.replace("0x", ""), 16) if args.pan_id else None
+    print(f"  Port open. Sniffer listening (no output until frames arrive).")
 
     # === Capture ON ===
     print(f"\n{'─'*50}")
     print(f"  Step 1: Capture ON command")
     print(f"{'─'*50}")
-    on_result = capture_command(ser, "ON", debug=args.debug)
+    on_result = capture_command(ser, "ON", target_pan=target_pan, debug=args.debug)
     if not on_result:
         print("\n  Timeout waiting for ON command. Make sure:")
         print("  - The sniffer firmware is flashed to the ESP32-C6")
@@ -259,7 +251,7 @@ def main():
     print(f"\n{'─'*50}")
     print(f"  Step 2: Capture OFF command")
     print(f"{'─'*50}")
-    off_result = capture_command(ser, "OFF", debug=args.debug)
+    off_result = capture_command(ser, "OFF", target_pan=target_pan, debug=args.debug)
     if not off_result:
         print("\n  Timeout waiting for OFF command.")
         ser.close()

@@ -544,9 +544,23 @@ enum AuthTagEnum : uint8_t {
     AUTH_TOKEN_RESPONSE = 0x06,
     SESSION_TYPE = 0x07,
     DISCONNECT = 0x08,
+    UNPAIR = 0x09,
     SESSION_VERSION = 0x11,
     AUTH_ERROR = 0xF0,
 };
+
+inline const char *describe_ltpdu_code(uint8_t code) {
+    switch (code) {
+        case 0: return "OK";
+        case 1: return "No Content";
+        case 2: return "Bad Request";
+        case 3: return "Unauthorized (invalid pairing code)";
+        case 4: return "Payload Too Large";
+        case 5: return "Pairing Slots Full (light needs factory reset - power cycle 5 times)";
+        case 6: return "Forbidden (admin key claim needed)";
+        default: return "Unknown Error";
+    }
+}
 
 // ---------------------------------------------------------------------------
 // UDP transport
@@ -728,6 +742,18 @@ class LtpduV3Session {
         return send_ltpdu(endpoint, value, vlen, 1);
     }
 
+    void unpair() {
+        if (session_) {
+            std::vector<uint8_t> unpair_tlv;
+            auth_tlv_append(unpair_tlv, UNPAIR, (const uint8_t *)"", 0);
+            auto enc = session_->encrypt(unpair_tlv);
+            send_secure(enc); // best effort
+            delete session_;
+            session_ = nullptr;
+        }
+        transport_.close();
+    }
+
     void disconnect() {
         if (session_) {
             std::vector<uint8_t> disc_tlv;
@@ -750,6 +776,11 @@ class LtpduV3Session {
         if (n <= 0) return {};
         auto resp = parse_v3_response(resp_buf, n);
         if (!resp.valid) return {};
+        if (resp.resp_code != 0) {
+            ESP_LOGE(LTPDU_TAG, "Secure request rejected: code %d (%s)",
+                     resp.resp_code, describe_ltpdu_code(resp.resp_code));
+            return {};
+        }
         if (resp.client_id != 0xFFFF) client_id_ = resp.client_id;
         return resp.data;
     }
@@ -783,7 +814,10 @@ class LtpduV3Session {
 inline bool provision_light_sync(const std::string &host,
                                  const std::string &pairing_code,
                                  const std::string &service_name_hint,
-                                 const uint8_t *shared_secret, size_t ss_len) {
+                                 const uint8_t *shared_secret, size_t ss_len,
+                                 uint16_t pan_id,
+                                 uint8_t channel,
+                                 uint16_t admin_key = 0) {
     LtpduV3Session session(host);
     if (!session.connect()) {
         ESP_LOGE(LTPDU_TAG, "UDP connect failed to %s", host.c_str());
@@ -799,6 +833,22 @@ inline bool provision_light_sync(const std::string &host,
         return false;
     }
 
+    // 1. Admin Key (if configured)
+    if (admin_key != 0) {
+        uint8_t admin_buf[2] = {static_cast<uint8_t>((admin_key >> 8) & 0xFF),
+                                static_cast<uint8_t>(admin_key & 0xFF)};
+        session.post("sp/admin", admin_buf, sizeof(admin_buf));
+    }
+
+    // 2. PAN ID
+    uint8_t pan_buf[2] = {static_cast<uint8_t>((pan_id >> 8) & 0xFF),
+                          static_cast<uint8_t>(pan_id & 0xFF)};
+    session.post("sp/pi", pan_buf, sizeof(pan_buf));
+
+    // 3. Channel
+    session.post("sp/mc", &channel, 1);
+
+    // 4. Shared Secret
     ESP_LOGI(LTPDU_TAG, "Writing sp/ss (%d bytes)...", ss_len);
     auto wr = session.post("sp/ss", shared_secret, ss_len);
     if (wr.status != 0 && wr.status != -1) {
@@ -815,7 +865,8 @@ inline bool provision_light_sync(const std::string &host,
                  rd.status, rd.value.size());
     }
 
-    session.disconnect();
+    // Clean up temporary pairing slot so it does not count towards the 5-slot ceiling
+    session.unpair();
     ESP_LOGI(LTPDU_TAG, "Provision complete for %s", host.c_str());
     return true;
 }

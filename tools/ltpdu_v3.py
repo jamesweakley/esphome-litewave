@@ -59,6 +59,45 @@ class ResponseCode(IntEnum):
     PayloadTooLarge = 4
     InternalServerError = 5
 
+
+class AuthErrorCode(IntEnum):
+    ClientIdNotFound = 1
+    VerificationFailed = 2
+    MaxPairingsReached = 3
+    PublicKeyNotSent = 4
+    BadRequest = 5
+    AuthTokenNotFound = 6
+
+
+AUTH_ERROR_DESCRIPTIONS = {
+    AuthErrorCode.ClientIdNotFound: "Client ID not found",
+    AuthErrorCode.VerificationFailed: "Verification failed (invalid credentials)",
+    AuthErrorCode.MaxPairingsReached: "Max pairings reached (all pairing slots full)",
+    AuthErrorCode.PublicKeyNotSent: "Public key not sent",
+    AuthErrorCode.BadRequest: "Bad request",
+    AuthErrorCode.AuthTokenNotFound: "Auth Token Not Found on device — This token is no longer stored in the light's pairing slots (already cleared, evicted, or invalid).",
+}
+
+
+def describe_response_code(code: int, context: str = "", auth_err_code: Optional[int] = None) -> str:
+    """Return human-readable explanation for LTPDU response / error codes."""
+    descriptions = {
+        0: "OK (Success)",
+        1: "No Content",
+        2: "Bad Request (malformed packet or parameters)",
+        3: "Unauthorized (invalid pairing code or credentials)",
+        4: "Payload Too Large",
+        5: "Internal Error / Pairing Slots Full — The light has reached its maximum pairing slots (~4-5 clients). Perform a factory reset on the light (power cycle 5 times) to clear slots. You will have to rejoin any Matter fabrics again afterwards.",
+        6: "Forbidden — Admin key required (POST 'sp/admin' first on fresh lights).",
+    }
+    desc = descriptions.get(code, f"Unknown error code {code}")
+    if auth_err_code is not None:
+        auth_desc = AUTH_ERROR_DESCRIPTIONS.get(auth_err_code, f"Auth error {auth_err_code}")
+        desc = f"{desc} [{auth_desc}]"
+    if context:
+        return f"{context} failed: code {code} ({desc})"
+    return f"Code {code}: {desc}"
+
 class AuthTag(IntEnum):
     AuthenticationType = 0x01
     Salt = 0x02
@@ -482,12 +521,14 @@ class LtpduV3Session:
         )
         print(f"  Step 1: sending A ({len(A_bytes)} bytes)...")
         rcode, rdata = self._send_secure(step1_tlv)
-        if rcode != ResponseCode.OK:
-            raise Exception(f"Step 1 failed: response code {rcode}")
+        tlvs = parse_auth_tlvs(rdata) if rdata else {}
+        auth_err = tlvs[AuthTag.Error][0] if AuthTag.Error in tlvs and tlvs[AuthTag.Error] else None
 
-        tlvs = parse_auth_tlvs(rdata)
-        if AuthTag.Error in tlvs:
-            raise Exception(f"Step 1 error: {tlvs[AuthTag.Error].hex()}")
+        if rcode != ResponseCode.OK:
+            raise Exception(describe_response_code(rcode, "Step 1 (Public Key Exchange)", auth_err))
+
+        if auth_err is not None:
+            raise Exception(f"Step 1 error: {describe_response_code(rcode, auth_err_code=auth_err)}")
 
         salt = tlvs.get(AuthTag.Salt)
         B = tlvs.get(AuthTag.PublicKey)
@@ -503,19 +544,21 @@ class LtpduV3Session:
         step2_tlv = build_auth_tlv(AuthTag.VerificationChallenge, M1)
         print(f"  Step 2: sending M1 ({len(M1)} bytes)...")
         rcode, rdata = self._send_secure(step2_tlv)
-        if rcode != ResponseCode.OK:
-            raise Exception(f"Step 2 failed: response code {rcode}")
+        tlvs = parse_auth_tlvs(rdata) if rdata else {}
+        auth_err = tlvs[AuthTag.Error][0] if AuthTag.Error in tlvs and tlvs[AuthTag.Error] else None
 
-        tlvs = parse_auth_tlvs(rdata)
-        if AuthTag.Error in tlvs:
-            raise Exception(f"Step 2 error: {tlvs[AuthTag.Error].hex()}")
+        if rcode != ResponseCode.OK:
+            raise Exception(describe_response_code(rcode, "Step 2 (Challenge Verification)", auth_err))
+
+        if auth_err is not None:
+            raise Exception(f"Step 2 error: {describe_response_code(rcode, auth_err_code=auth_err)}")
 
         M2 = tlvs.get(AuthTag.VerificationChallenge)
         if M2 is None:
             raise Exception(f"Step 2: missing M2. Got tags: {list(tlvs.keys())}")
 
         if not srp.verify_server_proof(M2):
-            raise Exception("Step 2: server proof verification failed")
+            raise Exception("Step 2: server proof verification failed (pairing code incorrect?)")
 
         print("  Step 2 OK: server proof verified")
 
@@ -531,7 +574,7 @@ class LtpduV3Session:
             print(f"  Step 3: requesting auth token...")
             rcode, rdata = self._send_secure(encrypted)
             if rcode != ResponseCode.OK:
-                raise Exception(f"Step 3 failed: response code {rcode}")
+                raise Exception(describe_response_code(rcode, "Step 3 (Auth Token Request)"))
             decrypted = self.session.decrypt(rdata)
             tlvs = parse_auth_tlvs(decrypted)
             auth_token_result = tlvs.get(AuthTag.AuthTokenResponse)
@@ -561,7 +604,7 @@ class LtpduV3Session:
         ver, mtype, mid, cid, rcode, rdata = parse_v3_response(raw)
 
         if rcode != ResponseCode.OK:
-            raise Exception(f"LTPDU request failed: response code {rcode}")
+            raise Exception(describe_response_code(rcode, f"LTPDU '{endpoint}'"))
 
         decrypted = self.session.decrypt(rdata)
         return parse_ltpdu_response(decrypted)
@@ -576,8 +619,32 @@ class LtpduV3Session:
         ep, status, rval = self._send_ltpdu(endpoint, value, method=1)
         return status, rval
 
+    def put(self, endpoint: str, value: bytes) -> Tuple[int, bytes]:
+        """PUT to an endpoint, return (status, response_value)."""
+        ep, status, rval = self._send_ltpdu(endpoint, value, method=2)
+        return status, rval
+
+    def delete(self, endpoint: str) -> Tuple[int, bytes]:
+        """DELETE an endpoint, return (status, response_value)."""
+        ep, status, rval = self._send_ltpdu(endpoint, method=3)
+        return status, rval
+
+    def unpair(self):
+        """Send Unpair command to free this client pairing slot on the light, then close."""
+        if self.session is not None:
+            try:
+                unpair_tlv = build_auth_tlv(AuthTag.Unpair, b"")
+                encrypted = self.session.encrypt(unpair_tlv)
+                pkt = build_v3_request(self._next_msg_id(), self.client_id,
+                                       UriType.Secure, MethodType.POST, encrypted)
+                self.transport.send_recv(pkt)
+            except Exception:
+                pass
+            self.session = None
+        self.transport.close()
+
     def disconnect(self):
-        """Send disconnect and close."""
+        """Send disconnect and close (retains pairing slot on light)."""
         if self.session is not None:
             try:
                 disc_tlv = build_auth_tlv(AuthTag.Disconnect, b"")
@@ -587,6 +654,7 @@ class LtpduV3Session:
                 self.transport.send_recv(pkt)
             except Exception:
                 pass
+            self.session = None
         self.transport.close()
 
     def close(self):
@@ -607,7 +675,7 @@ def main():
     group.add_argument("--pair", help="Matter pairing code (for PairingCode auth)")
     parser.add_argument("--port", type=int, default=12566)
     parser.add_argument("--cmd", default="info",
-                        choices=["info", "on", "off", "read-ss", "write-ss"],
+                        choices=["info", "on", "off", "read-ss", "write-ss", "unpair"],
                         help="Command to run after auth")
     parser.add_argument("--secret", help="New shared secret hex (for write-ss)")
     args = parser.parse_args()
@@ -623,7 +691,13 @@ def main():
         else:
             session.authenticate(args.service_name, bytes.fromhex(args.token))
 
-        if args.cmd == "info":
+        if args.cmd == "unpair":
+            print("\n--- Unpairing Client Slot ---")
+            session.unpair()
+            print("  ✓ Unpair command sent. Client slot released on device.")
+            return
+
+        elif args.cmd == "info":
             print("\n--- Device Info ---")
             status, value = session.get("di")
             print(f"  Status: {status}, Data ({len(value)} bytes): {value.hex()}")

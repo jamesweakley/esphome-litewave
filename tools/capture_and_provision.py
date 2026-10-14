@@ -62,9 +62,9 @@ SALT_IV_NEW = bytes.fromhex(
 class LegacyBleSession:
     def __init__(self, client):
         self.client = client
-        self.encrypt_cipher = None
-        self.decrypt_cipher = None
+        self.cipher_stream = None
         self._shared_secret = None
+        self.rx_queue = asyncio.Queue()
 
     def _init_ciphers(self, shared_secret, use_new_salts=True):
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -72,14 +72,29 @@ class LegacyBleSession:
         salt_iv = SALT_IV_NEW if use_new_salts else b"AES-NL-OPENAPI-IV"
         key = hashlib.sha1(salt_key + shared_secret).digest()[:16]
         iv = hashlib.sha1(salt_iv + shared_secret).digest()[:16]
-        self.encrypt_cipher = Cipher(algorithms.AES(key), modes.CTR(iv)).encryptor()
-        self.decrypt_cipher = Cipher(algorithms.AES(key), modes.CTR(iv)).decryptor()
+        # Single AES-CTR keystream shared across both TX and RX
+        self.cipher_stream = Cipher(algorithms.AES(key), modes.CTR(iv)).encryptor()
 
     def encrypt(self, data):
-        return self.encrypt_cipher.update(data)
+        return self.cipher_stream.update(data)
 
     def decrypt(self, data):
-        return self.decrypt_cipher.update(data)
+        return self.cipher_stream.update(data)
+
+    def _on_notify(self, sender, data):
+        self.rx_queue.put_nowait(bytes(data))
+
+    async def start_notifications(self):
+        try:
+            await self.client.start_notify(ENCRYPTED_CHAR, self._on_notify)
+        except Exception:
+            pass
+
+    async def stop_notifications(self):
+        try:
+            await self.client.stop_notify(ENCRYPTED_CHAR)
+        except Exception:
+            pass
 
     async def key_exchange(self):
         from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -100,43 +115,41 @@ class LegacyBleSession:
         await self.client.write_gatt_char(
             ENCRYPTION_SETUP, encrypted, response=True
         )
+        await asyncio.sleep(0.3)
         response = await self.client.read_gatt_char(ENCRYPTION_SETUP)
         return self.decrypt(bytes(response))
 
     async def send_encrypted(self, data):
         encrypted = self.encrypt(data)
+        # Drain any older notifications
+        while not self.rx_queue.empty():
+            self.rx_queue.get_nowait()
+
         await self.client.write_gatt_char(
             ENCRYPTED_CHAR, encrypted, response=True
         )
-        response = await self.client.read_gatt_char(ENCRYPTED_CHAR)
-        return self.decrypt(bytes(response))
+        try:
+            raw_resp = await asyncio.wait_for(self.rx_queue.get(), timeout=4.0)
+            return self.decrypt(raw_resp)
+        except (asyncio.TimeoutError, Exception):
+            # Fallback to direct read if notification not received
+            try:
+                response = await self.client.read_gatt_char(ENCRYPTED_CHAR)
+                return self.decrypt(bytes(response))
+            except Exception:
+                return b""
 
 
 def _build_ble_ltpdu_cmd(endpoint, value=None, method=0):
-    ep = endpoint.encode("utf-8")
-    tlv = struct.pack("!HH", 1, len(ep)) + ep
-    tlv += struct.pack("!HH", 2, len(value) if value else 0)
-    if value:
-        tlv += value
-    tlv += struct.pack("!HH", 4, 1) + bytes([method])
-    return tlv
-
-
-_coap_msg_id = 0
-
-
-def _wrap_coap(ltpdu_payload):
-    global _coap_msg_id
-    _coap_msg_id += 1
     buf = bytearray()
-    buf.append(0x42)
-    buf.append(0x02)
-    buf.extend(struct.pack("!H", _coap_msg_id))
-    buf.extend(struct.pack("!H", _coap_msg_id))
-    buf.append(0xB7)
-    buf.extend(b"nlltpdu")
-    buf.append(0xFF)
-    buf.extend(ltpdu_payload)
+    ep_bytes = endpoint.encode("utf-8")
+    buf.extend(struct.pack(">HH", 1, len(ep_bytes)))
+    buf.extend(ep_bytes)
+    buf.extend(struct.pack(">HH", 4, 1))
+    buf.append(method)  # 0=GET, 1=POST
+    if value:
+        buf.extend(struct.pack(">HH", 2, len(value)))
+        buf.extend(value)
     return bytes(buf)
 
 
@@ -146,9 +159,11 @@ def _parse_ble_ltpdu_response(data):
     status = -1
     value = b""
     while offset + 4 <= len(data):
-        tag = struct.unpack_from("!H", data, offset)[0]
-        length = struct.unpack_from("!H", data, offset + 2)[0]
-        v = data[offset + 4 : offset + 4 + length]
+        tag, length = struct.unpack(">HH", data[offset : offset + 4])
+        offset += 4
+        if offset + length > len(data):
+            break
+        v = data[offset : offset + length]
         if tag == 1:
             endpoint = v.decode("utf-8", errors="replace")
         elif tag == 3:
@@ -157,7 +172,7 @@ def _parse_ble_ltpdu_response(data):
                 value = v[1:]
         elif tag == 2:
             value = v
-        offset += 4 + length
+        offset += length
     return endpoint, status, value
 
 
@@ -208,7 +223,41 @@ async def scan_sense_switches(timeout=15.0):
     return switches
 
 
-async def write_shared_secret_ble(switch_name, setup_code, shared_secret):
+def _handle_ble_error(e: Exception, stage: str = "BLE operation"):
+    """Format and display user-friendly explanations for known BLE / GATT errors."""
+    err_str = str(e)
+    is_err_81 = "0x81" in err_str or " 129," in err_str or "(129" in err_str
+    is_err_87 = "0x87" in err_str or " 135," in err_str or "(135" in err_str
+    is_err_86 = "0x86" in err_str or " 134," in err_str or "(134" in err_str
+
+    print(f"\n  ❌ {stage} failed with error: {e}")
+    if is_err_81:
+        print("\n  💡 Root Cause: GATT Error 0x81 (Already Paired / Invalid Pairing Method)")
+        print("     The switch is already added/paired in the Nanoleaf app and rejected the Matter setup code.")
+        print("     Once paired, the switch only accepts its 16-hex Nanoleaf Cloud Auth Token for BLE session auth.")
+        print("\n  👉 How to fix:")
+        print("     1. Run: python3 tools/nanoleaf_cloud.py")
+        print("     2. Copy the switch's 16-hex Auth Token (e.g. '71a8489c673d929f')")
+        print("     3. Re-run this command passing the token:")
+        print("        python3 tools/capture_and_provision.py --switch-name \"...\" --switch-code \"<16_HEX_AUTH_TOKEN>\" ...")
+    elif is_err_87:
+        print("\n  💡 Root Cause: GATT Error 0x87 (Uncommissioned / Security Error)")
+        print("     The switch is in a factory-reset / uncommissioned state and cannot accept custom GATT writes.")
+        print("\n  👉 How to fix:")
+        print("     1. Add the switch to your home in the Nanoleaf app first.")
+        print("     2. Retrieve its 16-hex Auth Token by running: python3 tools/nanoleaf_cloud.py")
+        print("     3. Re-run this command with the Auth Token via --switch-code <AUTH_TOKEN>")
+    elif is_err_86:
+        print("\n  💡 Root Cause: GATT Error 0x86 (Invalid Credentials)")
+        print("     The switch rejected the provided setup code or Auth Token.")
+        print("     Double check the 11-digit code on the back sticker or run 'python3 tools/nanoleaf_cloud.py'.")
+    else:
+        print("\n  💡 Bluetooth Troubleshooting Tip:")
+        print("     - On macOS, CoreBluetooth may cache stale peripheral state. Try running: sudo pkill bluetoothd")
+        print("     - Ensure the switch is actively advertising by holding ON + OFF for 3 seconds until the white LED flashes.")
+
+
+async def write_shared_secret_ble(switch_name, setup_code, shared_secret, pan_id_hex, admin_key_hex, channel_val):
     """Write sp/ss to the Sense+ switch via BLE. Returns True on success."""
     try:
         from bleak import BleakClient, BleakScanner
@@ -231,7 +280,12 @@ async def write_shared_secret_ble(switch_name, setup_code, shared_secret):
 
     print(f"\n  Scanning for '{switch_name}'...")
     print("  (Hold ON + OFF buttons on switch for 3s until white light flashes)")
-    device = await BleakScanner.find_device_by_name(switch_name, timeout=20)
+    try:
+        device = await BleakScanner.find_device_by_name(switch_name, timeout=20)
+    except Exception as e:
+        _handle_ble_error(e, "BLE device scan")
+        return False
+
     if not device:
         print("  ERROR: Switch not found. Make sure:")
         print("    - The switch name is correct")
@@ -240,53 +294,124 @@ async def write_shared_secret_ble(switch_name, setup_code, shared_secret):
 
     print(f"  Found: {device.address}")
 
-    async with BleakClient(device, timeout=20) as client:
-        session = LegacyBleSession(client)
+    # Prepare radio parameters
+    pan_clean = pan_id_hex.replace("0x", "").strip().rjust(4, "0")
+    admin_clean = admin_key_hex.replace("0x", "").strip().rjust(4, "0")
+    pan_bytes = bytes.fromhex(pan_clean)
+    admin_bytes = bytes.fromhex(admin_clean)
 
-        # Key exchange
-        print("  Key exchange...")
-        await session.key_exchange()
-        session._init_ciphers(session._shared_secret, use_new_salts=True)
+    try:
+        async with BleakClient(device, timeout=20) as client:
+            session = LegacyBleSession(client)
 
-        # Pair with setup code
-        print("  Pairing...")
-        code_bytes = setup_code.replace("-", "").encode()
-        tlv_pairing = bytes([0x03, len(code_bytes)]) + code_bytes
-        resp = await session.send_encrypted_setup(tlv_pairing)
-        if len(resp) == 1 and resp[0] != 0:
-            print(f"  ERROR: Pairing failed (code 0x{resp[0]:02X})")
-            return False
-        print("  Paired OK")
+            # Key exchange
+            print("  Key exchange...")
+            try:
+                await session.key_exchange()
+            except Exception as e:
+                _handle_ble_error(e, "Key exchange")
+                return False
 
-        # Write sp/ss
-        print(f"  Writing sp/ss ({len(shared_secret)} bytes)...")
-        ltpdu_cmd = _build_ble_ltpdu_cmd("sp/ss", shared_secret, method=1)
-        coap_frame = _wrap_coap(ltpdu_cmd)
-        resp = await session.send_encrypted(coap_frame)
+            session._init_ciphers(session._shared_secret, use_new_salts=True)
 
-        # Verify by reading back
-        print("  Verifying...")
-        get_cmd = _build_ble_ltpdu_cmd("sp/ss", method=0)
-        coap_get = _wrap_coap(get_cmd)
-        resp = await session.send_encrypted(coap_get)
-        if len(resp) > 4:
-            ff_idx = resp.find(0xFF)
-            if ff_idx >= 0:
-                ltpdu_resp = resp[ff_idx + 1 :]
-                try:
-                    ep, status, val = _parse_ble_ltpdu_response(ltpdu_resp)
-                    if val == shared_secret:
-                        print("  Verified: sp/ss matches!")
-                        return True
-                    else:
-                        print("  WARNING: readback mismatch")
-                        return False
-                except Exception:
-                    pass
+            # Pair with setup code or auth token
+            print("  Pairing...")
+            clean_code = setup_code.replace("-", "").strip()
+            is_token = len(clean_code) == 16 and all(c in "0123456789abcdefABCDEF" for c in clean_code)
+            if is_token:
+                auth_bytes = bytes.fromhex(clean_code)
+                tlv_pairing = bytes([0x02, len(auth_bytes)]) + auth_bytes
+            else:
+                code_bytes = clean_code.encode("ascii")
+                tlv_pairing = bytes([0x03, len(code_bytes)]) + code_bytes
 
-        # Couldn't verify but write may have succeeded
-        print("  Write sent (could not verify readback)")
-        return True
+            try:
+                resp = await session.send_encrypted_setup(tlv_pairing)
+            except Exception as e:
+                _handle_ble_error(e, "Pairing / Setup authentication")
+                return False
+
+            if len(resp) == 1 and resp[0] != 0:
+                err_byte = resp[0]
+                if err_byte == 0x86:
+                    print(f"  ERROR: Pairing failed (code 0x86 — Invalid credentials).")
+                    print(f"         Check the 11-digit Matter setup code on the back sticker of the switch,")
+                    print(f"         or supply the switch's 16-hex Nanoleaf Cloud auth token via --switch-token.")
+                elif err_byte == 0x81:
+                    print(f"  ERROR: Pairing failed (code 0x81 — Already Paired).")
+                    print(f"         The switch is paired in the Nanoleaf app and requires its 16-hex Cloud Auth Token.")
+                    print(f"         Run 'python3 tools/nanoleaf_cloud.py' to find its Auth Token.")
+                elif err_byte == 0x87:
+                    print(f"  ERROR: Pairing failed (code 0x87 — Uncommissioned).")
+                    print(f"         The switch is uncommissioned. Add it to the Nanoleaf app first.")
+                else:
+                    print(f"  ERROR: Pairing failed (code 0x{err_byte:02X})")
+                return False
+            print("  Paired OK")
+            await session.start_notifications()
+            await asyncio.sleep(0.1)
+
+            # 1. Write sp/admin
+            print(f"  Setting switch Admin Key (0x{admin_clean})...")
+            resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/admin", admin_bytes, method=1))
+
+            # 2. Write sp/pi (PAN ID)
+            print(f"  Setting switch PAN ID (0x{pan_clean})...")
+            resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/pi", pan_bytes, method=1))
+
+            # 3. Write sp/mc (Channel)
+            print(f"  Setting switch Channel ({channel_val})...")
+            resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/mc", bytes([channel_val]), method=1))
+
+            # 4. Write sp/ss (Shared Secret)
+            print(f"  Writing switch sp/ss ({len(shared_secret)} bytes)...")
+            ltpdu_cmd = _build_ble_ltpdu_cmd("sp/ss", shared_secret, method=1)
+            resp = await session.send_encrypted(ltpdu_cmd)
+            if resp:
+                ep, status, val = _parse_ble_ltpdu_response(resp)
+                if status != -1 and status != 0:
+                    print(f"  ❌ Switch rejected write: status {status}")
+                    return False
+
+            # Verify by reading back
+            print("  Verifying switch configuration...")
+            get_admin = _build_ble_ltpdu_cmd("sp/admin", method=0)
+            resp_admin = await session.send_encrypted(get_admin)
+            if resp_admin:
+                _, _, val_admin = _parse_ble_ltpdu_response(resp_admin)
+                print(f"  -> sp/admin: 0x{val_admin.hex() if val_admin else '?'}")
+
+            get_pi = _build_ble_ltpdu_cmd("sp/pi", method=0)
+            resp_pi = await session.send_encrypted(get_pi)
+            if resp_pi:
+                _, _, val_pi = _parse_ble_ltpdu_response(resp_pi)
+                print(f"  -> sp/pi:    0x{val_pi.hex() if val_pi else '?'}")
+
+            get_mc = _build_ble_ltpdu_cmd("sp/mc", method=0)
+            resp_mc = await session.send_encrypted(get_mc)
+            if resp_mc:
+                _, _, val_mc = _parse_ble_ltpdu_response(resp_mc)
+                ch_num = val_mc[0] if val_mc else '?'
+                print(f"  -> sp/mc:    {ch_num}")
+
+            get_cmd = _build_ble_ltpdu_cmd("sp/ss", method=0)
+            resp = await session.send_encrypted(get_cmd)
+            if resp:
+                ep, status, val = _parse_ble_ltpdu_response(resp)
+                if val == shared_secret:
+                    print(f"  ✓ Verified: Switch sp/ss matches ({len(val)} bytes)!")
+                    return True
+                elif val:
+                    print(f"  ❌ WARNING: Switch sp/ss mismatch (expected {len(shared_secret)}B, readback {len(val)}B: {val.hex()[:32]}...)")
+                    return False
+                else:
+                    print(f"  Received response ({len(resp)}B): {resp.hex()[:32]}...")
+
+            print("  ⚠️  Write sent but could not verify readback from switch.")
+            return True
+    except Exception as e:
+        _handle_ble_error(e, "BLE session")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +419,6 @@ async def write_shared_secret_ble(switch_name, setup_code, shared_secret):
 # ---------------------------------------------------------------------------
 
 SYNC_BYTE = 0xAA
-LITEWAVE_PAN = 0x3B71
 LITEWAVE_DST = 0xFFF0
 
 
@@ -565,7 +689,7 @@ def read_frame(ser):
     return channel, rssi, lqi, frame_data
 
 
-def parse_litewave_frame(frame_data):
+def parse_litewave_frame(frame_data, target_pan=None):
     """Parse 802.15.4 frame and extract Litewave (dsn, token_hex) or None."""
     if len(frame_data) < 10:
         return None
@@ -599,7 +723,7 @@ def parse_litewave_frame(frame_data):
     else:
         return None
 
-    if dst_pan != LITEWAVE_PAN:
+    if target_pan is not None and dst_pan != target_pan:
         return None
     if dst_mode == 2 and dst_addr != LITEWAVE_DST:
         return None
@@ -620,13 +744,10 @@ def parse_litewave_frame(frame_data):
     cmd_type = payload[1]
     token = payload[2:16]
 
-    if cmd_type != 0x00:
-        return None
-
     return dsn, token.hex().upper()
 
 
-def capture_command(ser, label, timeout=30, debug=False):
+def capture_command(ser, label, target_pan=None, timeout=30, debug=False):
     """Wait for a Litewave command burst, return (seq, token_hex) or None."""
     print(f"\n  Listening for {label} command...")
     print(f"  >>> Press the {label} button on the Sense+ switch now <<<")
@@ -653,7 +774,7 @@ def capture_command(ser, label, timeout=30, debug=False):
                 f"len={len(frame_data)} hex={frame_data.hex()}"
             )
 
-        result = parse_litewave_frame(frame_data)
+        result = parse_litewave_frame(frame_data, target_pan=target_pan)
         if result is None:
             continue
 
@@ -737,6 +858,33 @@ def main():
         help="Setup code on the back of the switch (e.g. '0242-362-0007')",
     )
     parser.add_argument(
+        "--switch-token",
+        help="16-hex Nanoleaf Cloud auth token for the switch (alternative to --switch-code)",
+    )
+    parser.add_argument(
+        "--pan-id",
+        help="2-byte PAN ID hex string (e.g. from Nanoleaf cloud/app)",
+    )
+    parser.add_argument(
+        "--admin-key",
+        help="2-byte Admin Key hex string (e.g. from Nanoleaf cloud/app)",
+    )
+    parser.add_argument(
+        "--channel",
+        type=int,
+        help="802.15.4 radio channel (11-26)",
+    )
+    parser.add_argument(
+        "--cloud-email",
+        default=os.environ.get("NANOLEAF_EMAIL") or os.environ.get("NANOLEAF_USERNAME"),
+        help="Nanoleaf account email (to auto-fetch PAN ID, Admin Key, Channel from cloud)",
+    )
+    parser.add_argument(
+        "--cloud-password",
+        default=os.environ.get("NANOLEAF_PASSWORD"),
+        help="Nanoleaf account password",
+    )
+    parser.add_argument(
         "--secret",
         help="Shared secret as hex string (auto zero-padded to 54 bytes if shorter, random if omitted)",
     )
@@ -785,9 +933,9 @@ def main():
         asyncio.run(scan_sense_switches(timeout=15.0))
         return
 
-    if not args.capture_only and (not args.switch_name or not args.switch_code):
+    if not args.capture_only and (not args.switch_name or (not args.switch_code and not args.switch_token)):
         parser.error(
-            "--switch-name and --switch-code are required (or use --capture-only, --scan-switches, or --flash-sniffer)"
+            "--switch-name and either --switch-code or --switch-token are required (or use --capture-only, --scan-switches, or --flash-sniffer)"
         )
 
     # Determine shared secret
@@ -809,15 +957,47 @@ def main():
     print("=" * 56)
 
     # ── Step 1: BLE write ──────────────────────────────────────────
+    pan_id_hex = args.pan_id
+    admin_key_hex = args.admin_key
+    channel_val = args.channel
+
     if not args.capture_only:
+        # Resolve PAN ID, Admin Key, and Channel
+        if not pan_id_hex or not admin_key_hex or channel_val is None:
+            if args.cloud_email and args.cloud_password:
+                try:
+                    from nanoleaf_cloud import NanoleafCloudClient
+                    cloud_client = NanoleafCloudClient(username=args.cloud_email, password=args.cloud_password)
+                    home_cfg = cloud_client.get_home_config()
+                    if not pan_id_hex:
+                        pan_id_hex = home_cfg.get("pan_id")
+                    if not admin_key_hex:
+                        admin_key_hex = home_cfg.get("admin_key")
+                    if channel_val is None:
+                        channel_val = home_cfg.get("channel")
+                except Exception:
+                    pass
+
+        if not pan_id_hex:
+            pan_id_hex = input("Enter Nanoleaf Home PAN ID (hex, e.g. from Nanoleaf app/cloud): ").strip()
+        if not admin_key_hex:
+            admin_key_hex = input("Enter Nanoleaf Home Admin Key (hex): ").strip()
+        if channel_val is None:
+            ch_in = input("Enter 802.15.4 channel (11-26, default 26): ").strip()
+            channel_val = int(ch_in) if ch_in else 26
+
         print(f"\n{'─'*56}")
         print("  Step 1: Write shared secret to Sense+ switch via BLE")
         print(f"{'─'*56}")
-        print(f"  Secret: {secret_bytes.hex()}")
+        print(f"  Secret:    {secret_bytes.hex()}")
+        print(f"  PAN ID:    0x{pan_id_hex}")
+        print(f"  Admin Key: 0x{admin_key_hex}")
+        print(f"  Channel:   {channel_val}")
 
+        auth_val = args.switch_token if args.switch_token else args.switch_code
         ok = asyncio.run(
             write_shared_secret_ble(
-                args.switch_name, args.switch_code, secret_bytes
+                args.switch_name, auth_val, secret_bytes, pan_id_hex, admin_key_hex, channel_val
             )
         )
         if not ok:
@@ -828,6 +1008,8 @@ def main():
         print("  The switch will now generate tokens using this secret.")
     else:
         print("\n  (Skipping BLE write — capture only mode)")
+
+    target_pan_uint = int(pan_id_hex.replace("0x", ""), 16) if pan_id_hex else None
 
     # ── Step 2: Open sniffer ───────────────────────────────────────
     port = select_serial_port(args.port)
@@ -868,7 +1050,7 @@ def main():
         print(f"  Step {i + (0 if args.capture_only else 1)}: Capture {label}")
         print(f"{'─'*56}")
 
-        result = capture_command(ser, label, debug=args.debug)
+        result = capture_command(ser, label, target_pan=target_pan_uint, debug=args.debug)
         if result is None:
             if key in ("dim_plus", "dim_minus"):
                 print(f"\n  No {label} token captured. Skipping.")

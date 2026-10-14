@@ -12,7 +12,7 @@ Litewave is a simple fire-and-forget broadcast protocol over IEEE 802.15.4 (not 
 |-----------|-------|
 | Radio | IEEE 802.15.4 |
 | Channel | 26 (0x1A) |
-| PAN ID | 0x3B71 |
+| PAN ID | 0x3411 |
 | Destination | 0xFFF0 (multicast) |
 | FCF | 0x1801 (data frame, no security, no source address) |
 | Frame version | 1 |
@@ -23,7 +23,7 @@ Litewave is a simple fire-and-forget broadcast protocol over IEEE 802.15.4 (not 
 802.15.4 MAC header:
   FCF (2 bytes, LE)  = 0x1801
   DSN (1 byte)       = sequence number (changes per button press, used by ESPHome)
-  Dst PAN (2 bytes)  = 0x3B71
+  Dst PAN (2 bytes)  = 0x3411
   Dst Addr (2 bytes) = 0xFFF0
 
 Payload (18 bytes):
@@ -274,14 +274,14 @@ Location: `components/litewave/`
 ```yaml
 litewave:
   channel: 26
-  pan_id: 0x3B71
+  pan_id: 0x3411
   sniff: false
   groups:
     - id: kitchen
       on_sequence: 0x09
-      on_token: "33258BDC2E9B24FEE258DACFC67D"
+      on_token: "33251BDC2E9B24FEE258DACFC67D"
       off_sequence: 0x0B
-      off_token: "B7822E281E6EE98019CF6DDC6280"
+      off_token: "B7822E281E6E298019CF6DDC6280"
 ```
 
 ### Build Notes

@@ -6,3 +6,6 @@
 **/__pycache__/**
 tools/firmware/sniffer/build/
 tools/firmware/transmitter/build/
+homesync.json
+captured_*.yaml
+.snowflake/**

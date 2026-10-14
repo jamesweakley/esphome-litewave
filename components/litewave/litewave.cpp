@@ -169,7 +169,10 @@ void LitewaveComponent::provision_light(LitewaveGroup *group, int light_index) {
         light.pairing_code,
         light.name,
         group->get_shared_secret(),
-        group->get_shared_secret_len()
+        group->get_shared_secret_len(),
+        pan_id_,
+        channel_,
+        admin_key_
     );
     if (ok) {
         ESP_LOGI(TAG, "Provisioning succeeded for '%s'", light.name.c_str());

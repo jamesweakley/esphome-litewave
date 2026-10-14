@@ -296,14 +296,14 @@ Alternative method using the command interface:
   "spParams": {
     "nlPropParams": {
       "ss": "<54-byte-hex-string>",
-      "pi": 15217,
+      "pi": 13329,
       "acl": ""
     }
   }
 }
 ```
 
-Where `pi` is the PAN ID as a decimal integer (e.g. `0x3B71` = `15217`).
+Where `pi` is the PAN ID as a decimal integer (e.g. `0x3411` = `13329`).
 
 ## Rate Limiting
 

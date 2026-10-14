@@ -159,14 +159,42 @@ async def main():
         await session.key_exchange()
         session._init_ciphers(session._shared_secret, use_new_salts=True)
 
-        # Pair with setup code
+        # Pair with setup code or auth token
         print("\n=== Pairing ===")
-        code_bytes = setup_code.replace("-", "").encode()
-        tlv_pairing = bytes([0x03, len(code_bytes)]) + code_bytes
-        resp = await session.send_encrypted_setup(tlv_pairing)
+        clean_code = setup_code.replace("-", "").strip()
+        is_token = len(clean_code) == 16 and all(c in "0123456789abcdefABCDEF" for c in clean_code)
+        if is_token:
+            auth_bytes = bytes.fromhex(clean_code)
+            tlv_pairing = bytes([0x02, len(auth_bytes)]) + auth_bytes
+        else:
+            code_bytes = clean_code.encode("ascii")
+            tlv_pairing = bytes([0x03, len(code_bytes)]) + code_bytes
+
+        try:
+            resp = await session.send_encrypted_setup(tlv_pairing)
+        except Exception as e:
+            err_str = str(e)
+            print(f"\n  ❌ Pairing failed with error: {e}")
+            if "0x81" in err_str or " 129," in err_str or "(129" in err_str:
+                print("  💡 Root Cause: GATT Error 0x81 (Already Paired / Invalid Method)")
+                print("     The switch is paired in the Nanoleaf app and requires its 16-hex Cloud Auth Token.")
+                print("     Run: python3 tools/nanoleaf_cloud.py to retrieve its Auth Token.")
+            elif "0x87" in err_str or " 135," in err_str or "(135" in err_str:
+                print("  💡 Root Cause: GATT Error 0x87 (Uncommissioned / Security Error)")
+                print("     The switch is uncommissioned. Add it to your home in the Nanoleaf app first.")
+            return
+
         print(f"  Pairing response ({len(resp)}B): {resp.hex()}")
         if len(resp) == 1 and resp[0] != 0:
-            print(f"  ERROR: code 0x{resp[0]:02X}")
+            err_byte = resp[0]
+            if err_byte == 0x81:
+                print(f"  ERROR: code 0x81 (Already Paired — Pass 16-hex Cloud Auth Token instead of setup code)")
+            elif err_byte == 0x86:
+                print(f"  ERROR: code 0x86 (Invalid credentials)")
+            elif err_byte == 0x87:
+                print(f"  ERROR: code 0x87 (Uncommissioned switch)")
+            else:
+                print(f"  ERROR: code 0x{err_byte:02X}")
             return
         print("  Pairing OK!")
 

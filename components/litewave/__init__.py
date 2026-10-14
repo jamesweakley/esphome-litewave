@@ -11,6 +11,7 @@ DEPENDENCIES = ["esp32"]
 
 CONF_CHANNEL = "channel"
 CONF_PAN_ID = "pan_id"
+CONF_ADMIN_KEY = "admin_key"
 CONF_SNIFF = "sniff"
 CONF_GROUPS = "groups"
 CONF_GROUP_ID = "group"
@@ -100,8 +101,9 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(LitewaveComponent),
-            cv.Optional(CONF_CHANNEL, default=26): cv.int_range(min=11, max=26),
-            cv.Optional(CONF_PAN_ID, default=0x3B71): cv.hex_uint16_t,
+            cv.Required(CONF_CHANNEL): cv.int_range(min=11, max=26),
+            cv.Required(CONF_PAN_ID): cv.hex_uint16_t,
+            cv.Optional(CONF_ADMIN_KEY): cv.hex_uint16_t,
             cv.Optional(CONF_SNIFF, default=False): cv.boolean,
             cv.Optional(CONF_GROUPS, default=[]): cv.ensure_list(GROUP_SCHEMA),
         }
@@ -195,6 +197,8 @@ async def to_code(config):
 
     cg.add(var.set_channel(config[CONF_CHANNEL]))
     cg.add(var.set_pan_id(config[CONF_PAN_ID]))
+    if CONF_ADMIN_KEY in config:
+        cg.add(var.set_admin_key(config[CONF_ADMIN_KEY]))
     cg.add(var.set_sniff(config[CONF_SNIFF]))
 
     for group_conf in config.get(CONF_GROUPS, []):
