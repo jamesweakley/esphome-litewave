@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cerrno>
 #include <string>
 #include <vector>
 #include <functional>
@@ -561,7 +562,7 @@ class UdpTransport {
     bool open() {
         bool is_ipv6 = host_.find(':') != std::string::npos;
         int family = is_ipv6 ? AF_INET6 : AF_INET;
-        sock_ = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+        sock_ = ::socket(family, SOCK_DGRAM, IPPROTO_UDP);
         if (sock_ < 0) {
             ESP_LOGE(LTPDU_TAG, "socket() failed: %d", errno);
             return false;
@@ -570,7 +571,7 @@ class UdpTransport {
         struct timeval tv;
         tv.tv_sec = (int)timeout_s_;
         tv.tv_usec = (int)((timeout_s_ - tv.tv_sec) * 1000000);
-        setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        ::setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         if (is_ipv6) {
             memset(&addr6_, 0, sizeof(addr6_));
@@ -594,8 +595,8 @@ class UdpTransport {
         socklen_t addr_len = is_ipv6_ ? sizeof(addr6_) : sizeof(addr4_);
 
         for (int attempt = 0; attempt < retries; attempt++) {
-            sendto(sock_, data, len, 0, addr, addr_len);
-            int n = recvfrom(sock_, resp_buf, resp_max, 0, nullptr, nullptr);
+            ::sendto(sock_, data, len, 0, addr, addr_len);
+            int n = ::recvfrom(sock_, resp_buf, resp_max, 0, nullptr, nullptr);
             if (n > 0) return n;
             ESP_LOGW(LTPDU_TAG, "UDP timeout, retry %d/%d", attempt + 2, retries);
         }

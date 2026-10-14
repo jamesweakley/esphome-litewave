@@ -315,11 +315,11 @@ void LitewaveComponent::process_rx_frame(const RxFrame &frame) {
         sprintf(&token_hex[i * 2], "%02X", token[i]);
     }
 
-    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, " ");
     ESP_LOGI(TAG, "=== Litewave command captured (rssi=%d) ===", frame.rssi);
     ESP_LOGI(TAG, "  sequence: 0x%02X", seq);
     ESP_LOGI(TAG, "  token: \"%s\"", token_hex);
-    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, " ");
     ESP_LOGI(TAG, "Add to your YAML group config:");
     ESP_LOGI(TAG, "  on_sequence: 0x%02X     # if this was an ON press", seq);
     ESP_LOGI(TAG, "  on_token: \"%s\"   # if this was an ON press", token_hex);
