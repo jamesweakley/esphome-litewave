@@ -224,7 +224,7 @@ static bool query_and_match_mdns(const char *service_type, const char *proto,
         std::string inst_upper = inst;
         for (auto &c : inst_upper) c = toupper((unsigned char)c);
 
-        ESP_LOGI(TAG, "Found mDNS device: '%s'", inst.c_str());
+        ESP_LOGI(TAG, "  Found mDNS device: '%s'", inst.c_str());
 
         // Check if instance name ends with target_id, contains " <target_id>", or contains target_id
         bool match = false;
@@ -243,8 +243,6 @@ static bool query_and_match_mdns(const char *service_type, const char *proto,
             std::string val = r->txt[t].value ? r->txt[t].value : "";
             std::string val_upper = val;
             for (auto &c : val_upper) c = toupper((unsigned char)c);
-
-            ESP_LOGD(TAG, "  TXT %s=%s", key.c_str(), val.c_str());
 
             if ((key == "id" || key == "eui64" || key == "eui") &&
                 (val_upper == target_upper ||
@@ -274,6 +272,12 @@ static bool query_and_match_mdns(const char *service_type, const char *proto,
                 out.port = r->port != 0 ? r->port : 12566;
                 out.instance_name = inst;
                 found = true;
+                ESP_LOGI(TAG, "  -> Matched target '%s': IP=%s:%d", target_id.c_str(), out.ip.c_str(), out.port);
+                for (size_t t = 0; t < r->txt_count; t++) {
+                    std::string key = r->txt[t].key ? r->txt[t].key : "";
+                    std::string val = r->txt[t].value ? r->txt[t].value : "";
+                    ESP_LOGI(TAG, "     TXT %s=%s", key.c_str(), val.c_str());
+                }
             }
         }
         r = r->next;
