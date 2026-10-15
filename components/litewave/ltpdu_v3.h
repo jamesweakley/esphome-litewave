@@ -631,10 +631,15 @@ class UdpTransport {
         socklen_t addr_len = is_ipv6_ ? sizeof(addr6_) : sizeof(addr4_);
 
         for (int attempt = 0; attempt < retries; attempt++) {
-            ::sendto(sock_, data, len, 0, addr, addr_len);
+            ssize_t sent = ::sendto(sock_, data, len, 0, addr, addr_len);
+            if (sent < 0) {
+                ESP_LOGE(LTPDU_TAG, "sendto() failed (errno=%d: %s)", errno, strerror(errno));
+            } else {
+                ESP_LOGD(LTPDU_TAG, "sendto() sent %d bytes to %s:%d", (int)sent, host_.c_str(), port_);
+            }
             int n = ::recvfrom(sock_, resp_buf, resp_max, 0, nullptr, nullptr);
             if (n > 0) return n;
-            ESP_LOGW(LTPDU_TAG, "UDP timeout, retry %d/%d", attempt + 2, retries);
+            ESP_LOGW(LTPDU_TAG, "UDP timeout (attempt %d/%d)", attempt + 1, retries);
         }
         return -1;
     }

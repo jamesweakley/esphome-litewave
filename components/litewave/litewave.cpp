@@ -266,22 +266,24 @@ static bool query_and_match_mdns(const char *service_type, const char *proto,
 
                 if (match) {
                     mdns_ip_addr_t *a = r->addr;
+                    int ip_count = 0;
                     while (a) {
                         char ip_buf[INET6_ADDRSTRLEN];
                         if (a->addr.type == ESP_IPADDR_TYPE_V6) {
                             inet_ntop(AF_INET6, &(a->addr.u_addr.ip6), ip_buf, sizeof(ip_buf));
-                            out.ip = ip_buf;
-                            break;
+                            ESP_LOGI(TAG, "  -> Address[%d]: %s (IPv6)", ip_count++, ip_buf);
+                            if (out.ip.empty()) out.ip = ip_buf;
                         } else if (a->addr.type == ESP_IPADDR_TYPE_V4) {
                             inet_ntop(AF_INET, &(a->addr.u_addr.ip4), ip_buf, sizeof(ip_buf));
-                            out.ip = ip_buf;
+                            ESP_LOGI(TAG, "  -> Address[%d]: %s (IPv4)", ip_count++, ip_buf);
+                            if (out.ip.empty()) out.ip = ip_buf;
                         }
                         a = a->next;
                     }
                     if (!out.ip.empty()) {
                         out.port = r->port != 0 ? r->port : 12566;
                         out.instance_name = inst;
-                        ESP_LOGI(TAG, "  -> Matched target '%s': IP=%s:%d", target_id.c_str(), out.ip.c_str(), out.port);
+                        ESP_LOGI(TAG, "  -> Matched target '%s': Using IP=%s:%d", target_id.c_str(), out.ip.c_str(), out.port);
                         for (size_t t = 0; t < r->txt_count; t++) {
                             std::string key = r->txt[t].key ? r->txt[t].key : "";
                             std::string val = r->txt[t].value ? r->txt[t].value : "";
