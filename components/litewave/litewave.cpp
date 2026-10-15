@@ -202,16 +202,13 @@ struct DiscoveredLight {
     std::string instance_name;
 };
 
-static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &out) {
-    esp_err_t err = mdns_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "mdns_init: %d", err);
-    }
-
+static bool query_and_match_mdns(const char *service_type, const char *proto,
+                                  uint32_t timeout_ms, const std::string &target_id,
+                                  DiscoveredLight &out) {
     mdns_result_t *results = nullptr;
-    err = mdns_query_ptr("_ltpdu", "_udp", 3000, 20, &results);
+    esp_err_t err = mdns_query_ptr(service_type, proto, timeout_ms, 20, &results);
     if (err != ESP_OK || !results) {
-        ESP_LOGW(TAG, "mDNS query for _ltpdu._udp returned no results (err=%d)", err);
+        ESP_LOGD(TAG, "mDNS query for %s.%s returned no results (err=%d)", service_type, proto, err);
         return false;
     }
 
@@ -220,26 +217,46 @@ static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &ou
 
     bool found = false;
     mdns_result_t *r = results;
+    int count = 0;
     while (r) {
+        count++;
         std::string inst = r->instance_name ? r->instance_name : "";
         std::string inst_upper = inst;
         for (auto &c : inst_upper) c = toupper((unsigned char)c);
 
-        bool match = (inst_upper.find(target_upper) != std::string::npos);
+        ESP_LOGI(TAG, "Found mDNS device: '%s'", inst.c_str());
 
+        // Check if instance name ends with target_id, contains " <target_id>", or contains target_id
+        bool match = false;
+        if (inst_upper == target_upper ||
+            inst_upper.find(" " + target_upper) != std::string::npos ||
+            inst_upper.find("-" + target_upper) != std::string::npos ||
+            (inst_upper.length() >= target_upper.length() &&
+             inst_upper.rfind(target_upper) == inst_upper.length() - target_upper.length()) ||
+            inst_upper.find(target_upper) != std::string::npos) {
+            match = true;
+        }
+
+        // Also check TXT properties
         for (size_t t = 0; t < r->txt_count && !match; t++) {
             std::string key = r->txt[t].key ? r->txt[t].key : "";
             std::string val = r->txt[t].value ? r->txt[t].value : "";
             std::string val_upper = val;
             for (auto &c : val_upper) c = toupper((unsigned char)c);
 
-            if ((key == "id" || key == "eui64" || key == "eui") && val_upper.find(target_upper) != std::string::npos) {
+            ESP_LOGD(TAG, "  TXT %s=%s", key.c_str(), val.c_str());
+
+            if ((key == "id" || key == "eui64" || key == "eui") &&
+                (val_upper == target_upper ||
+                 (val_upper.length() >= target_upper.length() &&
+                  val_upper.rfind(target_upper) == val_upper.length() - target_upper.length()) ||
+                 val_upper.find(target_upper) != std::string::npos)) {
                 match = true;
                 break;
             }
         }
 
-        if (match) {
+        if (match && !found) {
             mdns_ip_addr_t *a = r->addr;
             while (a) {
                 char ip_buf[INET6_ADDRSTRLEN];
@@ -257,14 +274,36 @@ static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &ou
                 out.port = r->port != 0 ? r->port : 12566;
                 out.instance_name = inst;
                 found = true;
-                break;
             }
         }
         r = r->next;
     }
 
+    ESP_LOGI(TAG, "mDNS %s.%s query finished (%d devices found, matched=%s)",
+             service_type, proto, count, found ? "YES" : "NO");
+
     mdns_query_results_free(results);
     return found;
+}
+
+static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &out) {
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "mdns_init: %d", err);
+    }
+
+    // 1. Try _ltpdu._udp (10-second timeout)
+    if (query_and_match_mdns("_ltpdu", "_udp", 10000, target_id, out)) {
+        return true;
+    }
+
+    // 2. Fallback: try _nanoleafapi._tcp
+    ESP_LOGI(TAG, "Checking fallback service _nanoleafapi._tcp...");
+    if (query_and_match_mdns("_nanoleafapi", "_tcp", 5000, target_id, out)) {
+        return true;
+    }
+
+    return false;
 }
 
 void LitewaveComponent::run_provision_task(const std::string &light_id) {
