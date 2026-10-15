@@ -839,6 +839,7 @@ class LtpduV3Session {
 // ---------------------------------------------------------------------------
 
 inline bool provision_light_sync(const std::string &host,
+                                 uint16_t port,
                                  const std::string &pairing_code,
                                  const std::string &service_name_hint,
                                  const uint8_t *shared_secret, size_t ss_len,
@@ -847,7 +848,7 @@ inline bool provision_light_sync(const std::string &host,
                                  uint16_t admin_key = 0,
                                  const uint8_t *acl_payload = nullptr,
                                  size_t acl_len = 0) {
-    LtpduV3Session session(host);
+    LtpduV3Session session(host, port);
     if (!session.connect()) {
         ESP_LOGE(LTPDU_TAG, "UDP connect failed to %s", host.c_str());
         return false;

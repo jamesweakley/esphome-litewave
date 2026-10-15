@@ -1,5 +1,6 @@
 #include "litewave.h"
 #include "ltpdu_v3.h"
+#include "mdns.h"
 
 namespace esphome {
 namespace litewave {
@@ -195,6 +196,77 @@ void LitewaveComponent::provision_light(const std::string &light_id) {
     }
 }
 
+struct DiscoveredLight {
+    std::string ip;
+    uint16_t port{12566};
+    std::string instance_name;
+};
+
+static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &out) {
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "mdns_init: %d", err);
+    }
+
+    mdns_result_t *results = nullptr;
+    err = mdns_query_ptr("_ltpdu", "_udp", 3000, 20, &results);
+    if (err != ESP_OK || !results) {
+        ESP_LOGW(TAG, "mDNS query for _ltpdu._udp returned no results (err=%d)", err);
+        return false;
+    }
+
+    std::string target_upper = target_id;
+    for (auto &c : target_upper) c = toupper((unsigned char)c);
+
+    bool found = false;
+    mdns_result_t *r = results;
+    while (r) {
+        std::string inst = r->instance_name ? r->instance_name : "";
+        std::string inst_upper = inst;
+        for (auto &c : inst_upper) c = toupper((unsigned char)c);
+
+        bool match = (inst_upper.find(target_upper) != std::string::npos);
+
+        for (size_t t = 0; t < r->txt_count && !match; t++) {
+            std::string key = r->txt[t].key ? r->txt[t].key : "";
+            std::string val = r->txt[t].value ? r->txt[t].value : "";
+            std::string val_upper = val;
+            for (auto &c : val_upper) c = toupper((unsigned char)c);
+
+            if ((key == "id" || key == "eui64" || key == "eui") && val_upper.find(target_upper) != std::string::npos) {
+                match = true;
+                break;
+            }
+        }
+
+        if (match) {
+            mdns_ip_addr_t *a = r->addr;
+            while (a) {
+                char ip_buf[INET6_ADDRSTRLEN];
+                if (a->addr.type == ESP_IPADDR_TYPE_V6) {
+                    inet_ntop(AF_INET6, &(a->addr.u_addr.ip6), ip_buf, sizeof(ip_buf));
+                    out.ip = ip_buf;
+                    break;
+                } else if (a->addr.type == ESP_IPADDR_TYPE_V4) {
+                    inet_ntop(AF_INET, &(a->addr.u_addr.ip4), ip_buf, sizeof(ip_buf));
+                    out.ip = ip_buf;
+                }
+                a = a->next;
+            }
+            if (!out.ip.empty()) {
+                out.port = r->port != 0 ? r->port : 12566;
+                out.instance_name = inst;
+                found = true;
+                break;
+            }
+        }
+        r = r->next;
+    }
+
+    mdns_query_results_free(results);
+    return found;
+}
+
 void LitewaveComponent::run_provision_task(const std::string &light_id) {
     LitewaveGroup *target_group = nullptr;
     const LightInfo *target_light = nullptr;
@@ -222,15 +294,31 @@ void LitewaveComponent::run_provision_task(const std::string &light_id) {
 
     std::string light_name = target_light->name.empty() ? (target_light->id.empty() ? "Light" : target_light->id) : target_light->name;
     std::string target_host = target_light->host;
+    uint16_t target_port = 12566;
+
     if (target_host.empty()) {
-        ESP_LOGE(TAG, "Light '%s' has no 'host' (IP/hostname) configured in YAML", light_id.c_str());
-        return;
+        ESP_LOGI(TAG, "Resolving light '%s' via mDNS (_ltpdu._udp)...", light_id.c_str());
+        DiscoveredLight disc;
+        std::string lookup_id = !target_light->id.empty() ? target_light->id : light_id;
+        if (resolve_light_mdns(lookup_id, disc)) {
+            target_host = disc.ip;
+            target_port = disc.port;
+            if (target_light->name.empty() && !disc.instance_name.empty()) {
+                light_name = disc.instance_name;
+            }
+            ESP_LOGI(TAG, "mDNS resolved light '%s' to %s:%d (%s)",
+                     lookup_id.c_str(), target_host.c_str(), target_port, light_name.c_str());
+        } else {
+            ESP_LOGE(TAG, "Could not resolve light '%s' via mDNS and no 'host' specified in YAML", light_id.c_str());
+            return;
+        }
     }
 
-    ESP_LOGI(TAG, "Provisioning light '%s' at %s", light_name.c_str(), target_host.c_str());
+    ESP_LOGI(TAG, "Provisioning light '%s' at %s:%d", light_name.c_str(), target_host.c_str(), target_port);
 
     bool ok = provision_light_sync(
         target_host,
+        target_port,
         target_light->pairing_code,
         light_name,
         target_group->get_shared_secret(),

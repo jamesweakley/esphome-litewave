@@ -222,6 +222,7 @@ def _hex_to_byte_array(hex_str, name):
 
 async def to_code(config):
     esp32.include_builtin_idf_component("ieee802154")
+    esp32.include_builtin_idf_component("mdns")
     esp32.add_idf_sdkconfig_option("CONFIG_IEEE802154_ENABLED", True)
     esp32.add_idf_sdkconfig_option("CONFIG_IEEE802154_RX_BUFFER_SIZE", 20)
     esp32.add_idf_sdkconfig_option("CONFIG_ESP_COEX_ENABLED", True)
