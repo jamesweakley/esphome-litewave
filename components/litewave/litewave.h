@@ -129,6 +129,8 @@ class LitewaveComponent : public Component {
     void on_rx_done(uint8_t *frame, esp_ieee802154_frame_info_t *frame_info);
 
  protected:
+    static void provision_task_trampoline(void *arg);
+    void run_provision_task(const std::string &light_id);
     void transmit_command(uint8_t seq, const uint8_t *token);
     bool transmit_frame(const uint8_t *frame_data, uint8_t frame_len);
     void build_litewave_frame(uint8_t *buf, uint8_t *len, uint8_t seq, uint16_t dst, const uint8_t *token);

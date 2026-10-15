@@ -591,12 +591,34 @@ class UdpTransport {
             memset(&addr6_, 0, sizeof(addr6_));
             addr6_.sin6_family = AF_INET6;
             addr6_.sin6_port = htons(port_);
-            inet_pton(AF_INET6, host_.c_str(), &addr6_.sin6_addr);
+            if (inet_pton(AF_INET6, host_.c_str(), &addr6_.sin6_addr) <= 0) {
+                struct addrinfo hints{}, *res = nullptr;
+                hints.ai_family = AF_INET6;
+                hints.ai_socktype = SOCK_DGRAM;
+                if (getaddrinfo(host_.c_str(), nullptr, &hints, &res) == 0 && res) {
+                    memcpy(&addr6_, res->ai_addr, sizeof(addr6_));
+                    addr6_.sin6_port = htons(port_);
+                    freeaddrinfo(res);
+                } else {
+                    ESP_LOGE(LTPDU_TAG, "Failed to resolve IPv6 host '%s'", host_.c_str());
+                    close();
+                    return false;
+                }
+            }
         } else {
             memset(&addr4_, 0, sizeof(addr4_));
             addr4_.sin_family = AF_INET;
             addr4_.sin_port = htons(port_);
-            inet_pton(AF_INET, host_.c_str(), &addr4_.sin_addr);
+            if (inet_pton(AF_INET, host_.c_str(), &addr4_.sin_addr) <= 0) {
+                struct hostent *he = gethostbyname(host_.c_str());
+                if (he && he->h_addr_list && he->h_addr_list[0]) {
+                    memcpy(&addr4_.sin_addr, he->h_addr_list[0], sizeof(addr4_.sin_addr));
+                } else {
+                    ESP_LOGE(LTPDU_TAG, "Failed to resolve host '%s'", host_.c_str());
+                    close();
+                    return false;
+                }
+            }
         }
         is_ipv6_ = is_ipv6;
         return true;

@@ -164,7 +164,38 @@ void LitewaveComponent::send_dim_minus(LitewaveGroup *group) {
     transmit_command(group->get_dim_minus_sequence(), group->get_dim_minus_token());
 }
 
+struct ProvisionContext {
+    LitewaveComponent *component;
+    std::string light_id;
+};
+
+void LitewaveComponent::provision_task_trampoline(void *arg) {
+    auto *ctx = static_cast<ProvisionContext *>(arg);
+    if (ctx && ctx->component) {
+        ctx->component->run_provision_task(ctx->light_id);
+    }
+    delete ctx;
+    vTaskDelete(nullptr);
+}
+
 void LitewaveComponent::provision_light(const std::string &light_id) {
+    ESP_LOGI(TAG, "Starting background provisioning task for light '%s'", light_id.c_str());
+    auto *ctx = new ProvisionContext{this, light_id};
+    BaseType_t res = xTaskCreate(
+        provision_task_trampoline,
+        "ltpdu_prov",
+        8192,
+        ctx,
+        tskIDLE_PRIORITY + 1,
+        nullptr
+    );
+    if (res != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create background provisioning task (error %d)", res);
+        delete ctx;
+    }
+}
+
+void LitewaveComponent::run_provision_task(const std::string &light_id) {
     LitewaveGroup *target_group = nullptr;
     const LightInfo *target_light = nullptr;
 
@@ -190,7 +221,12 @@ void LitewaveComponent::provision_light(const std::string &light_id) {
     }
 
     std::string light_name = target_light->name.empty() ? (target_light->id.empty() ? "Light" : target_light->id) : target_light->name;
-    std::string target_host = !target_light->host.empty() ? target_light->host : target_light->id;
+    std::string target_host = target_light->host;
+    if (target_host.empty()) {
+        ESP_LOGE(TAG, "Light '%s' has no 'host' (IP/hostname) configured in YAML", light_id.c_str());
+        return;
+    }
+
     ESP_LOGI(TAG, "Provisioning light '%s' at %s", light_name.c_str(), target_host.c_str());
 
     bool ok = provision_light_sync(
