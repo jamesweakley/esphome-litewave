@@ -6,6 +6,16 @@ Works on **ESP32-C6** and **ESP32-H2** (or any ESP32 with an 802.15.4 radio). Se
 
 ---
 
+## Why use this? Home Assistant already supports Matter over Thread
+
+You can use this in conjunction with Matter over Thread, getting the best of both worlds.
+
+With Matter, you can control the lights from Home Assistant, set up automations, etc.
+
+However, nothing beats Litewave when it comes to instant, direct light control. When using an ESP32-based light switch with this extension, there is zero other infrastructure involved. No Home Assistant server, no Wifi, no Thread mesh.
+
+---
+
 ## How It Works: Cryptographic Room Isolation
 
 Nanoleaf Sense+ switches and downlights authenticate commands using a 54-byte shared secret (`sp/ss`).
@@ -151,7 +161,7 @@ api:
     - service: provision_light
       variables:
         light_id: string
-        pairing_code: string   # Optional: pass pairing code from an open Matter commissioning window
+        pairing_code: string
       then:
         - litewave.provision_light:
             light_id: !lambda "return light_id;"
