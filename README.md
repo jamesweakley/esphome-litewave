@@ -145,6 +145,18 @@ litewave:
           pairing_code: "1640-700-5590"
           # host: "192.168.1.50"              # Optional manual IP/host override
 
+# Expose an interactive Provisioning Service to Home Assistant (Tools -> Actions):
+api:
+  services:
+    - service: provision_light
+      variables:
+        light_id: string
+        pairing_code: string   # Optional: pass pairing code from an open Matter commissioning window
+      then:
+        - litewave.provision_light:
+            light_id: !lambda "return light_id;"
+            pairing_code: !lambda "return pairing_code;"
+
 # Wire actions to physical buttons, Home Assistant entities, or automations:
 binary_sensor:
   - platform: gpio
@@ -162,7 +174,7 @@ binary_sensor:
       - litewave.send_off:
           group: living_room
 
-# Trigger light provisioning directly from Home Assistant
+# Or trigger light provisioning directly via a static button:
 button:
   - platform: template
     name: "Provision Living Room Light 1"
@@ -199,7 +211,7 @@ button:
 | `dim_plus_token` | hex string (28 chars) | Optional | 14-byte captured DIM+ token |
 | `dim_minus_sequence` | hex uint8 | Optional | Sequence number for DIM- (brightness down) |
 | `dim_minus_token` | hex string (28 chars) | Optional | 14-byte captured DIM- token |
-| `lights` | list | Optional | List of `{id, pairing_code, [name], [host]}` for on-device provisioning |
+| `lights` | list | Optional | List of `{id, [pairing_code], [name], [host]}` for on-device provisioning |
 
 ### Available ESPHome Actions
 
@@ -207,7 +219,7 @@ button:
 - `litewave.send_off: group: <group_id>` — Transmits OFF command burst
 - `litewave.send_dim_plus: group: <group_id>` — Transmits DIM+ brightness up command burst
 - `litewave.send_dim_minus: group: <group_id>` — Transmits DIM- brightness down command burst
-- `litewave.provision_light: light_id: <light_id>` — Runs on-device SRP-6a provisioning over UDP to push the assigned group's `shared_secret` and switch ACL to the light.
+- `litewave.provision_light: light_id: <light_id> [, pairing_code: <pairing_code>]` — Runs on-device SRP-6a provisioning over UDP to push the assigned group's `shared_secret` and switch ACL to the light (accepts templated lambdas).
 
 ---
 

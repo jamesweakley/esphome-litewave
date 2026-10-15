@@ -58,12 +58,17 @@ template<typename... Ts>
 class LitewaveProvisionLightAction : public Action<Ts...> {
  public:
     LitewaveProvisionLightAction(LitewaveComponent *parent) : parent_(parent) {}
-    void set_light_id(const std::string &id) { light_id_ = id; }
-    void play(Ts... x) override { parent_->provision_light(light_id_); }
+    TEMPLATABLE_VALUE(std::string, light_id)
+    TEMPLATABLE_VALUE(std::string, pairing_code)
+
+    void play(Ts... x) override {
+        std::string id = this->light_id_.value(x...);
+        std::string code = this->pairing_code_.value(x...);
+        this->parent_->provision_light(id, code);
+    }
 
  protected:
     LitewaveComponent *parent_;
-    std::string light_id_{};
 };
 
 }  // namespace litewave

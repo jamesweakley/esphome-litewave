@@ -117,7 +117,7 @@ LIGHT_SCHEMA = cv.Schema(
         cv.Optional(CONF_ID): cv.string_strict,
         cv.Optional(CONF_NAME, default=""): cv.string_strict,
         cv.Optional(CONF_HOST, default=""): cv.string_strict,
-        cv.Required(CONF_PAIRING_CODE): cv.string_strict,
+        cv.Optional(CONF_PAIRING_CODE, default=""): cv.string_strict,
     }
 )
 
@@ -164,7 +164,8 @@ LITEWAVE_GROUP_ACTION_SCHEMA = cv.Schema(
 LITEWAVE_PROVISION_ACTION_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.use_id(LitewaveComponent),
-        cv.Required(CONF_LIGHT_ID): cv.string_strict,
+        cv.Required(CONF_LIGHT_ID): cv.templatable(cv.string_strict),
+        cv.Optional(CONF_PAIRING_CODE): cv.templatable(cv.string_strict),
     }
 )
 
@@ -211,7 +212,11 @@ async def litewave_send_dim_minus_to_code(config, action_id, template_arg, args)
 async def litewave_provision_light_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, parent)
-    cg.add(var.set_light_id(config[CONF_LIGHT_ID]))
+    template_id = await cg.templatable(config[CONF_LIGHT_ID], args, cg.std_string)
+    cg.add(var.set_light_id(template_id))
+    if CONF_PAIRING_CODE in config:
+        template_code = await cg.templatable(config[CONF_PAIRING_CODE], args, cg.std_string)
+        cg.add(var.set_pairing_code(template_code))
     return var
 
 

@@ -122,7 +122,7 @@ class LitewaveComponent : public Component {
     void send_dim_plus(LitewaveGroup *group);
     void send_dim_minus(LitewaveGroup *group);
 
-    void provision_light(const std::string &light_id);
+    void provision_light(const std::string &light_id, const std::string &override_pairing_code = "");
 
     // Called from ISR context via C callback trampolines
     void on_tx_done(bool success);
@@ -130,7 +130,7 @@ class LitewaveComponent : public Component {
 
  protected:
     static void provision_task_trampoline(void *arg);
-    void run_provision_task(const std::string &light_id);
+    void run_provision_task(const std::string &light_id, const std::string &override_pairing_code);
     void transmit_command(uint8_t seq, const uint8_t *token);
     bool transmit_frame(const uint8_t *frame_data, uint8_t frame_len);
     void build_litewave_frame(uint8_t *buf, uint8_t *len, uint8_t seq, uint16_t dst, const uint8_t *token);

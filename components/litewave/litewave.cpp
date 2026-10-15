@@ -169,20 +169,21 @@ void LitewaveComponent::send_dim_minus(LitewaveGroup *group) {
 struct ProvisionContext {
     LitewaveComponent *component;
     std::string light_id;
+    std::string pairing_code;
 };
 
 void LitewaveComponent::provision_task_trampoline(void *arg) {
     auto *ctx = static_cast<ProvisionContext *>(arg);
     if (ctx && ctx->component) {
-        ctx->component->run_provision_task(ctx->light_id);
+        ctx->component->run_provision_task(ctx->light_id, ctx->pairing_code);
     }
     delete ctx;
     vTaskDelete(nullptr);
 }
 
-void LitewaveComponent::provision_light(const std::string &light_id) {
+void LitewaveComponent::provision_light(const std::string &light_id, const std::string &override_pairing_code) {
     ESP_LOGI(TAG, "Starting background provisioning task for light '%s'", light_id.c_str());
-    auto *ctx = new ProvisionContext{this, light_id};
+    auto *ctx = new ProvisionContext{this, light_id, override_pairing_code};
     BaseType_t res = xTaskCreate(
         provision_task_trampoline,
         "ltpdu_prov",
@@ -345,7 +346,7 @@ static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &ou
     return false;
 }
 
-void LitewaveComponent::run_provision_task(const std::string &light_id) {
+void LitewaveComponent::run_provision_task(const std::string &light_id, const std::string &override_pairing_code) {
     LitewaveGroup *target_group = nullptr;
     const LightInfo *target_light = nullptr;
 
@@ -367,6 +368,12 @@ void LitewaveComponent::run_provision_task(const std::string &light_id) {
 
     if (target_group->get_shared_secret_len() == 0) {
         ESP_LOGE(TAG, "No shared_secret configured for the group containing light '%s'", light_id.c_str());
+        return;
+    }
+
+    std::string pairing_code = !override_pairing_code.empty() ? override_pairing_code : target_light->pairing_code;
+    if (pairing_code.empty()) {
+        ESP_LOGE(TAG, "No pairing code available for light '%s' (not in YAML and none provided in service call)", light_id.c_str());
         return;
     }
 
@@ -398,7 +405,7 @@ void LitewaveComponent::run_provision_task(const std::string &light_id) {
     bool ok = provision_light_sync(
         target_host,
         target_port,
-        target_light->pairing_code,
+        pairing_code,
         srp_service_name,
         target_group->get_shared_secret(),
         target_group->get_shared_secret_len(),
