@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LTPDU v3 UDP client for Nanoleaf NL65 lights.
+LTPDU v3 UDP client for Nanoleaf NL65 lights with firmware v5.0.0 and above.
 
 Implements the full protocol stack:
   - V3 binary framing (12-byte headers)

@@ -742,6 +742,11 @@ class LtpduV3Session {
         return send_ltpdu(endpoint, value, vlen, 1);
     }
 
+    // PUT to an LTPDU endpoint
+    LtpduResponse put(const std::string &endpoint, const uint8_t *value, size_t vlen) {
+        return send_ltpdu(endpoint, value, vlen, 2);
+    }
+
     void unpair() {
         if (session_) {
             std::vector<uint8_t> unpair_tlv;
@@ -817,7 +822,9 @@ inline bool provision_light_sync(const std::string &host,
                                  const uint8_t *shared_secret, size_t ss_len,
                                  uint16_t pan_id,
                                  uint8_t channel,
-                                 uint16_t admin_key = 0) {
+                                 uint16_t admin_key = 0,
+                                 const uint8_t *acl_payload = nullptr,
+                                 size_t acl_len = 0) {
     LtpduV3Session session(host);
     if (!session.connect()) {
         ESP_LOGE(LTPDU_TAG, "UDP connect failed to %s", host.c_str());
@@ -863,6 +870,32 @@ inline bool provision_light_sync(const std::string &host,
     } else {
         ESP_LOGW(LTPDU_TAG, "sp/ss readback mismatch (status=%d, len=%d)",
                  rd.status, rd.value.size());
+    }
+
+    // 5. Switch Access Control List (ACL)
+    if (acl_payload && acl_len > 0) {
+        ESP_LOGI(LTPDU_TAG, "Writing lb/0/sp/llc/acl (%d bytes)...", acl_len);
+        auto wr_acl = session.put("lb/0/sp/llc/acl", acl_payload, acl_len);
+        if (wr_acl.status != 0 && wr_acl.status != -1) {
+            wr_acl = session.put("sp/llc/acl", acl_payload, acl_len);
+        }
+        if (wr_acl.status == 0 || wr_acl.status == -1) {
+            ESP_LOGI(LTPDU_TAG, "ACL write succeeded");
+        } else {
+            ESP_LOGW(LTPDU_TAG, "ACL write status: %d", wr_acl.status);
+        }
+
+        // Verify ACL readback
+        auto rd_acl = session.get("lb/0/sp/llc/acl");
+        if (rd_acl.status != 0) {
+            rd_acl = session.get("sp/llc/acl");
+        }
+        if (rd_acl.status == 0 && rd_acl.value.size() == acl_len &&
+            memcmp(rd_acl.value.data(), acl_payload, acl_len) == 0) {
+            ESP_LOGI(LTPDU_TAG, "ACL verified!");
+        } else if (rd_acl.status == 0) {
+            ESP_LOGI(LTPDU_TAG, "ACL readback received (%d bytes)", rd_acl.value.size());
+        }
     }
 
     // Clean up temporary pairing slot so it does not count towards the 5-slot ceiling

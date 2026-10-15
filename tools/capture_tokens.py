@@ -205,6 +205,7 @@ def main():
     parser.add_argument("--port", help="Serial port (auto-detected if omitted)")
     parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default 115200)")
     parser.add_argument("--pan-id", help="Filter by 2-byte PAN ID hex string (optional)")
+    parser.add_argument("--switch-eui", help="16-hex character EUI-64 of the Sense+ switch (optional)")
     parser.add_argument("--group-name", default="room", help="ESPHome group name (default: room)")
     parser.add_argument("--debug", action="store_true", help="Show all received frames")
     args = parser.parse_args()
@@ -262,19 +263,21 @@ def main():
 
     # === Output ===
     group_name = args.group_name
+    switch_eui_line = f'      switch_eui: "{args.switch_eui.lower()}"\n' if args.switch_eui else ""
 
     print(f"\n{'━'*50}")
     print(f"  Capture complete!")
     print(f"{'━'*50}")
+    if args.switch_eui:
+        print(f"  Switch EUI: {args.switch_eui.lower()}")
     print(f"\n  ON:  seq=0x{on_seq:02X}  token={on_token}")
     print(f"  OFF: seq=0x{off_seq:02X}  token={off_token}")
 
-    yaml_block = f"""
-# ESPHome Litewave group config — paste into your YAML
+    yaml_block = f"""# ESPHome Litewave group config — paste into your YAML
 litewave:
   groups:
     - id: {group_name}
-      on_sequence: 0x{on_seq:02X}
+{switch_eui_line}      on_sequence: 0x{on_seq:02X}
       on_token: "{on_token}"
       off_sequence: 0x{off_seq:02X}
       off_token: "{off_token}"

@@ -116,9 +116,22 @@ void LitewaveComponent::dump_config() {
         if (group->get_shared_secret_len() > 0) {
             ESP_LOGCONFIG(TAG, "    Shared secret: %d bytes", group->get_shared_secret_len());
         }
+        if (!group->get_switch_eui().empty()) {
+            ESP_LOGCONFIG(TAG, "    Switch EUI: %s", group->get_switch_eui().c_str());
+        }
+        if (group->get_acl_len() > 0) {
+            ESP_LOGCONFIG(TAG, "    ACL payload: %d bytes", group->get_acl_len());
+        }
         ESP_LOGCONFIG(TAG, "    Lights: %d", group->get_lights().size());
         for (const auto &light : group->get_lights()) {
-            ESP_LOGCONFIG(TAG, "      %s @ %s", light.name.c_str(), light.host.c_str());
+            std::string desc = light.name.empty() ? (light.id.empty() ? "Light" : light.id) : light.name;
+            if (!light.id.empty() && !light.host.empty()) {
+                ESP_LOGCONFIG(TAG, "      [%s] %s @ %s", light.id.c_str(), desc.c_str(), light.host.c_str());
+            } else if (!light.id.empty()) {
+                ESP_LOGCONFIG(TAG, "      [%s] %s", light.id.c_str(), desc.c_str());
+            } else {
+                ESP_LOGCONFIG(TAG, "      %s @ %s", desc.c_str(), light.host.c_str());
+            }
         }
     }
 }
@@ -162,22 +175,26 @@ void LitewaveComponent::provision_light(LitewaveGroup *group, int light_index) {
         return;
     }
     const auto &light = group->get_lights()[light_index];
-    ESP_LOGI(TAG, "Provisioning light '%s' at %s", light.name.c_str(), light.host.c_str());
+    std::string light_name = light.name.empty() ? (light.id.empty() ? "Light" : light.id) : light.name;
+    std::string target_host = !light.host.empty() ? light.host : light.id;
+    ESP_LOGI(TAG, "Provisioning light '%s' at %s", light_name.c_str(), target_host.c_str());
 
     bool ok = provision_light_sync(
-        light.host,
+        target_host,
         light.pairing_code,
-        light.name,
+        light_name,
         group->get_shared_secret(),
         group->get_shared_secret_len(),
         pan_id_,
         channel_,
-        admin_key_
+        admin_key_,
+        group->get_acl_payload(),
+        group->get_acl_len()
     );
     if (ok) {
-        ESP_LOGI(TAG, "Provisioning succeeded for '%s'", light.name.c_str());
+        ESP_LOGI(TAG, "Provisioning succeeded for '%s'", light_name.c_str());
     } else {
-        ESP_LOGE(TAG, "Provisioning FAILED for '%s'", light.name.c_str());
+        ESP_LOGE(TAG, "Provisioning FAILED for '%s'", light_name.c_str());
     }
 }
 

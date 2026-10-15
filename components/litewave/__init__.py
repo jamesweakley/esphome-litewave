@@ -24,6 +24,7 @@ CONF_DIM_PLUS_TOKEN = "dim_plus_token"
 CONF_DIM_MINUS_SEQUENCE = "dim_minus_sequence"
 CONF_DIM_MINUS_TOKEN = "dim_minus_token"
 CONF_SHARED_SECRET = "shared_secret"
+CONF_SWITCH_EUI = "switch_eui"
 CONF_LIGHTS = "lights"
 CONF_NAME = "name"
 CONF_HOST = "host"
@@ -73,10 +74,49 @@ def validate_shared_secret(value):
     return value
 
 
+def validate_switch_eui(value):
+    """Validate a 16-hex Sense+ switch EUI-64 address (or 8-hex entry)."""
+    if isinstance(value, int):
+        value = f"{value:x}"
+    else:
+        value = cv.string_strict(value)
+    value = value.replace(" ", "").replace(":", "").replace("-", "").lower()
+    if value.startswith("0x"):
+        value = value[2:]
+    if len(value) not in (8, 16):
+        raise cv.Invalid(f"Switch EUI must be 16 hex chars (EUI-64) or 8 hex chars, got {len(value)} chars")
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        raise cv.Invalid("Switch EUI must be valid hexadecimal")
+    return value
+
+
+def build_switch_acl_payload(switch_eui_hex):
+    """
+    Derive the 10-byte TLV ACL payload for a switch EUI:
+    Tag 0x01 (ControlList): 4 bytes (take(4) + takeLast(4) of EUI-64)
+    Tag 0x02 (MotionList):  4 bytes (take(4) + takeLast(4) of EUI-64)
+    """
+    clean = switch_eui_hex.replace(":", "").replace("-", "").strip().lower()
+    if clean.startswith("0x"):
+        clean = clean[2:]
+    if len(clean) == 16:
+        entry_hex = clean[:4] + clean[-4:]
+    elif len(clean) == 8:
+        entry_hex = clean
+    else:
+        raise cv.Invalid(f"Invalid switch EUI length: {len(clean)}")
+    entry_bytes = [int(entry_hex[i : i + 2], 16) for i in range(0, len(entry_hex), 2)]
+    # Tag 0x01 (len=4) + entry + Tag 0x02 (len=4) + entry
+    return [0x01, len(entry_bytes)] + entry_bytes + [0x02, len(entry_bytes)] + entry_bytes
+
+
 LIGHT_SCHEMA = cv.Schema(
     {
-        cv.Required(CONF_NAME): cv.string_strict,
-        cv.Required(CONF_HOST): cv.string_strict,
+        cv.Optional(CONF_ID): cv.string_strict,
+        cv.Optional(CONF_NAME, default=""): cv.string_strict,
+        cv.Optional(CONF_HOST, default=""): cv.string_strict,
         cv.Required(CONF_PAIRING_CODE): cv.string_strict,
     }
 )
@@ -85,6 +125,7 @@ GROUP_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ID): cv.declare_id(LitewaveGroup),
         cv.Optional(CONF_SHARED_SECRET): validate_shared_secret,
+        cv.Optional(CONF_SWITCH_EUI): validate_switch_eui,
         cv.Required(CONF_ON_SEQUENCE): cv.hex_uint8_t,
         cv.Required(CONF_ON_TOKEN): validate_token,
         cv.Required(CONF_OFF_SEQUENCE): cv.hex_uint8_t,
@@ -252,12 +293,28 @@ async def to_code(config):
             ))
             cg.add(group_var.set_shared_secret(cg.RawExpression(ss_arr_name), len(ss_bytes)))
 
+        # Switch EUI / ACL payload (optional, for provisioning)
+        if CONF_SWITCH_EUI in group_conf:
+            switch_eui_str = group_conf[CONF_SWITCH_EUI]
+            acl_bytes = build_switch_acl_payload(switch_eui_str)
+            acl_arr_name = f"{group_id.id}_acl"
+            cg.add_global(cg.RawExpression(
+                f"static const uint8_t {acl_arr_name}[] = {{{', '.join(f'0x{b:02X}' for b in acl_bytes)}}}"
+            ))
+            cg.add(group_var.set_acl_payload(cg.RawExpression(acl_arr_name), len(acl_bytes)))
+            cg.add(group_var.set_switch_eui(switch_eui_str))
+
         # Lights (optional, for provisioning)
         for light_conf in group_conf.get(CONF_LIGHTS, []):
+            light_id = light_conf.get(CONF_ID, "")
+            light_name = light_conf.get(CONF_NAME, "")
+            light_host = light_conf.get(CONF_HOST, "")
+            pairing_code = light_conf[CONF_PAIRING_CODE]
             cg.add(cg.RawStatement(
-                f'{group_var}->add_light({{"{light_conf[CONF_NAME]}", '
-                f'"{light_conf[CONF_HOST]}", '
-                f'"{light_conf[CONF_PAIRING_CODE]}"}});'
+                f'{group_var}->add_light({{"{light_id}", '
+                f'"{light_name}", '
+                f'"{light_host}", '
+                f'"{pairing_code}"}});'
             ))
 
         cg.add(var.add_group(group_var))

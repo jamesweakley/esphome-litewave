@@ -278,6 +278,8 @@ litewave:
   sniff: false
   groups:
     - id: kitchen
+      switch_eui: "e406bffffed47797"
+      shared_secret: "0x01"
       on_sequence: 0x09
       on_token: "33251BDC2E9B24FEE258DACFC67D"
       off_sequence: 0x0B

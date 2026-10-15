@@ -129,7 +129,8 @@ litewave:
 
   groups:
     - id: living_room
-      shared_secret: "0x01"  # auto zero-padded to 54 bytes
+      switch_eui: "e406bffffed47797"  # 16-hex EUI-64 of the switch (used to configure light ACL)
+      shared_secret: "0x01"           # auto zero-padded to 54 bytes, this is written to the lights and is what actually creates group isolation
       on_sequence: 0xFB
       on_token: "949B16B63E32024A9DD73E032211"
       off_sequence: 0xFD
@@ -139,9 +140,10 @@ litewave:
       dim_minus_sequence: 0x05
       dim_minus_token: "166BAA118582F3C3FF4D6B92298E"
       lights:
-        - name: "Living Room DL 1"
-          host: "192.168.1.50"
+        - id: "789"                           # 3-char hardware ID, mDNS name, or EUI
+          name: "Living Room DL 1"
           pairing_code: "1640-700-5590"
+          # host: "192.168.1.50"              # Optional manual IP/host override
 
 # Wire actions to physical buttons, Home Assistant entities, or automations:
 binary_sensor:
@@ -188,6 +190,7 @@ button:
 | Option | Type | Required | Description |
 |---|---|---|---|
 | `id` | ID | Yes | Group identifier for action calls |
+| `switch_eui` | string (16-hex chars) | Optional | Switch EUI-64 address (e.g. `"e406bffffed47797"`), used to automatically build and write the light's switch ACL (`lb/0/sp/llc/acl`) during provisioning |
 | `shared_secret` | string / hex | Optional | Shared secret (e.g. `"0x01"` or 108 hex chars). Auto-padded to 54 bytes. |
 | `on_sequence` | hex uint8 | Yes | 802.15.4 sequence number for ON |
 | `on_token` | hex string (28 chars) | Yes | 14-byte captured ON token |
@@ -197,7 +200,7 @@ button:
 | `dim_plus_token` | hex string (28 chars) | Optional | 14-byte captured DIM+ token |
 | `dim_minus_sequence` | hex uint8 | Optional | Sequence number for DIM- (brightness down) |
 | `dim_minus_token` | hex string (28 chars) | Optional | 14-byte captured DIM- token |
-| `lights` | list | Optional | List of `{name, host, pairing_code}` for on-device provisioning |
+| `lights` | list | Optional | List of `{id, pairing_code, [name], [host]}` for on-device provisioning |
 
 ### Available ESPHome Actions
 

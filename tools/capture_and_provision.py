@@ -854,6 +854,10 @@ def main():
         help="BLE device name of the Sense+ switch (e.g. 'Nanoleaf Wireless SW 1D9')",
     )
     parser.add_argument(
+        "--switch-eui",
+        help="16-hex character EUI-64 of the Sense+ switch (e.g. 'e406bffffed47797')",
+    )
+    parser.add_argument(
         "--switch-code",
         help="Setup code on the back of the switch (e.g. '0242-362-0007')",
     )
@@ -960,10 +964,11 @@ def main():
     pan_id_hex = args.pan_id
     admin_key_hex = args.admin_key
     channel_val = args.channel
+    switch_eui = args.switch_eui
 
     if not args.capture_only:
-        # Resolve PAN ID, Admin Key, and Channel
-        if not pan_id_hex or not admin_key_hex or channel_val is None:
+        # Resolve PAN ID, Admin Key, Channel, and Switch EUI
+        if not pan_id_hex or not admin_key_hex or channel_val is None or not switch_eui:
             if args.cloud_email and args.cloud_password:
                 try:
                     from nanoleaf_cloud import NanoleafCloudClient
@@ -975,6 +980,12 @@ def main():
                         admin_key_hex = home_cfg.get("admin_key")
                     if channel_val is None:
                         channel_val = home_cfg.get("channel")
+                    if not switch_eui:
+                        cloud_devs = cloud_client.get_devices()
+                        for cd in cloud_devs:
+                            if cd.get("eui64") and (cd.get("name") == args.switch_name or cd.get("model") == "NL44"):
+                                switch_eui = cd["eui64"]
+                                break
                 except Exception:
                     pass
 
@@ -1086,6 +1097,8 @@ def main():
         "  groups:",
         f"    - id: {group_name}",
     ]
+    if switch_eui:
+        lines.append(f'      switch_eui: "{switch_eui.lower()}"')
     if secret_bytes:
         if args.secret:
             user_ss = args.secret.strip().replace(" ", "").replace(":", "")
@@ -1120,6 +1133,8 @@ def main():
 
     # Also output JSON for catalog use
     json_data = {"group_name": group_name}
+    if switch_eui:
+        json_data["switch_eui"] = switch_eui.lower()
     if secret_bytes:
         json_data["shared_secret"] = secret_bytes.hex()
     for key, _ in BUTTONS:

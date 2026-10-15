@@ -79,13 +79,13 @@ def save_catalog(path, entries):
     # Use a cleaner format
     header = (
         "# Pre-generated Litewave token catalog\n"
-        "# Each entry maps a deterministic shared_secret to captured tokens.\n"
+        "# Each entry maps a deterministic shared_secret and switch_eui to captured tokens.\n"
         "# Shared secrets are 54 bytes: 53 zero bytes + index byte.\n"
         "# Users can pick any entry and skip the manual capture process.\n"
         "#\n"
         "# To use an entry:\n"
-        "#   1. Note the shared_secret and token values\n"
-        "#   2. Provision your lights with that shared_secret\n"
+        "#   1. Note the switch_eui, shared_secret, and token values\n"
+        "#   2. Provision your lights with that shared_secret and switch_eui\n"
         "#   3. Use the tokens in your ESPHome YAML config\n"
         "\n"
     )
@@ -104,9 +104,39 @@ def main():
         help="BLE device name of the Sense+ switch",
     )
     parser.add_argument(
+        "--switch-eui",
+        help="16-hex character EUI-64 of the Sense+ switch (e.g. 'e406bffffed47797')",
+    )
+    parser.add_argument(
         "--switch-code",
-        required=True,
-        help="Setup code on the back of the switch",
+        help="Setup code on the back of the switch (e.g. '0242-362-0007')",
+    )
+    parser.add_argument(
+        "--switch-token",
+        help="16-hex Nanoleaf Cloud auth token for the switch (alternative to --switch-code)",
+    )
+    parser.add_argument(
+        "--pan-id",
+        help="2-byte PAN ID hex string (e.g. from Nanoleaf cloud/app)",
+    )
+    parser.add_argument(
+        "--admin-key",
+        help="2-byte Admin Key hex string (e.g. from Nanoleaf cloud/app)",
+    )
+    parser.add_argument(
+        "--channel",
+        type=int,
+        help="802.15.4 radio channel (11-26)",
+    )
+    parser.add_argument(
+        "--cloud-email",
+        default=os.environ.get("NANOLEAF_EMAIL") or os.environ.get("NANOLEAF_USERNAME"),
+        help="Nanoleaf account email (to auto-fetch PAN ID, Admin Key, Channel, and Switch EUI)",
+    )
+    parser.add_argument(
+        "--cloud-password",
+        default=os.environ.get("NANOLEAF_PASSWORD"),
+        help="Nanoleaf account password",
     )
     parser.add_argument("--port", help="Sniffer serial port (auto-detected)")
     parser.add_argument(
@@ -163,6 +193,48 @@ def main():
 
     print(f"Sniffer: {port}")
 
+    # Resolve parameters from cloud if needed
+    pan_id_hex = args.pan_id
+    admin_key_hex = args.admin_key
+    channel_val = args.channel
+    switch_eui = args.switch_eui
+
+    if not pan_id_hex or not admin_key_hex or channel_val is None or not switch_eui:
+        if args.cloud_email and args.cloud_password:
+            try:
+                from nanoleaf_cloud import NanoleafCloudClient
+                cloud_client = NanoleafCloudClient(username=args.cloud_email, password=args.cloud_password)
+                home_cfg = cloud_client.get_home_config()
+                if not pan_id_hex:
+                    pan_id_hex = home_cfg.get("pan_id")
+                if not admin_key_hex:
+                    admin_key_hex = home_cfg.get("admin_key")
+                if channel_val is None:
+                    channel_val = home_cfg.get("channel")
+                if not switch_eui:
+                    cloud_devs = cloud_client.get_devices()
+                    for cd in cloud_devs:
+                        if cd.get("eui64") and (cd.get("name") == args.switch_name or cd.get("model") == "NL44"):
+                            switch_eui = cd["eui64"]
+                            break
+            except Exception:
+                pass
+
+    if not pan_id_hex:
+        pan_id_hex = "3411"  # default fallback if not specified
+    if not admin_key_hex:
+        admin_key_hex = "0000"
+    if channel_val is None:
+        channel_val = 26
+
+    auth_val = args.switch_token if args.switch_token else args.switch_code
+    if not auth_val:
+        print("ERROR: Either --switch-code or --switch-token is required.")
+        sys.exit(1)
+
+    print(f"Switch: {args.switch_name} (EUI: {switch_eui or 'unknown'})")
+    print(f"Radio:  PAN=0x{pan_id_hex} Channel={channel_val} AdminKey=0x{admin_key_hex}")
+
     buttons = BUTTONS if not args.skip_dim else BUTTONS[:2]
     end_index = args.start + args.count
 
@@ -184,7 +256,7 @@ def main():
         )
         ok = asyncio.run(
             write_shared_secret_ble(
-                args.switch_name, args.switch_code, secret
+                args.switch_name, auth_val, secret, pan_id_hex, admin_key_hex, channel_val
             )
         )
         if not ok:
@@ -192,7 +264,7 @@ def main():
             time.sleep(5)
             ok = asyncio.run(
                 write_shared_secret_ble(
-                    args.switch_name, args.switch_code, secret
+                    args.switch_name, auth_val, secret, pan_id_hex, admin_key_hex, channel_val
                 )
             )
             if not ok:
@@ -206,6 +278,8 @@ def main():
             "index": idx,
             "shared_secret": secret.hex(),
         }
+        if switch_eui:
+            entry["switch_eui"] = switch_eui.lower()
         all_captured = True
 
         for key, label in buttons:

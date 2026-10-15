@@ -31,6 +31,7 @@ struct RxFrame {
 };
 
 struct LightInfo {
+    std::string id;
     std::string name;
     std::string host;
     std::string pairing_code;
@@ -54,6 +55,14 @@ class LitewaveGroup {
         shared_secret_len_ = copy_len;
     }
 
+    void set_acl_payload(const uint8_t *acl, size_t len) {
+        size_t copy_len = len < sizeof(acl_payload_) ? len : sizeof(acl_payload_);
+        memcpy(acl_payload_, acl, copy_len);
+        acl_len_ = copy_len;
+    }
+
+    void set_switch_eui(const std::string &eui) { switch_eui_ = eui; }
+
     void add_light(const LightInfo &light) { lights_.push_back(light); }
 
     uint8_t get_on_sequence() const { return on_seq_; }
@@ -70,6 +79,9 @@ class LitewaveGroup {
 
     const uint8_t *get_shared_secret() const { return shared_secret_; }
     size_t get_shared_secret_len() const { return shared_secret_len_; }
+    const uint8_t *get_acl_payload() const { return acl_payload_; }
+    size_t get_acl_len() const { return acl_len_; }
+    const std::string &get_switch_eui() const { return switch_eui_; }
     const std::vector<LightInfo> &get_lights() const { return lights_; }
 
  protected:
@@ -86,6 +98,9 @@ class LitewaveGroup {
     uint16_t dst_{0xFFF0};
     uint8_t shared_secret_[LITEWAVE_SHARED_SECRET_LEN]{};
     size_t shared_secret_len_{0};
+    uint8_t acl_payload_[16]{};
+    size_t acl_len_{0};
+    std::string switch_eui_{};
     std::vector<LightInfo> lights_;
 };
 
