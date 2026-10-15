@@ -29,7 +29,7 @@ CONF_LIGHTS = "lights"
 CONF_NAME = "name"
 CONF_HOST = "host"
 CONF_PAIRING_CODE = "pairing_code"
-CONF_LIGHT_INDEX = "light_index"
+CONF_LIGHT_ID = "light_id"
 
 litewave_ns = cg.esphome_ns.namespace("litewave")
 LitewaveComponent = litewave_ns.class_("LitewaveComponent", cg.Component)
@@ -164,8 +164,7 @@ LITEWAVE_GROUP_ACTION_SCHEMA = cv.Schema(
 LITEWAVE_PROVISION_ACTION_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.use_id(LitewaveComponent),
-        cv.Required(CONF_GROUP_ID): cv.use_id(LitewaveGroup),
-        cv.Required(CONF_LIGHT_INDEX): cv.int_range(min=0),
+        cv.Required(CONF_LIGHT_ID): cv.string_strict,
     }
 )
 
@@ -212,9 +211,7 @@ async def litewave_send_dim_minus_to_code(config, action_id, template_arg, args)
 async def litewave_provision_light_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, parent)
-    group = await cg.get_variable(config[CONF_GROUP_ID])
-    cg.add(var.set_group(group))
-    cg.add(var.set_light_index(config[CONF_LIGHT_INDEX]))
+    cg.add(var.set_light_id(config[CONF_LIGHT_ID]))
     return var
 
 

@@ -58,14 +58,12 @@ template<typename... Ts>
 class LitewaveProvisionLightAction : public Action<Ts...> {
  public:
     LitewaveProvisionLightAction(LitewaveComponent *parent) : parent_(parent) {}
-    void set_group(LitewaveGroup *group) { group_ = group; }
-    void set_light_index(int index) { light_index_ = index; }
-    void play(Ts... x) override { parent_->provision_light(group_, light_index_); }
+    void set_light_id(const std::string &id) { light_id_ = id; }
+    void play(Ts... x) override { parent_->provision_light(light_id_); }
 
  protected:
     LitewaveComponent *parent_;
-    LitewaveGroup *group_{nullptr};
-    int light_index_{0};
+    std::string light_id_{};
 };
 
 }  // namespace litewave

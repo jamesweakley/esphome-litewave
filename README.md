@@ -168,8 +168,7 @@ button:
     name: "Provision Living Room Light 1"
     on_press:
       - litewave.provision_light:
-          group: living_room
-          light_index: 0
+          light_id: "789"
 ```
 
 ---
@@ -208,7 +207,7 @@ button:
 - `litewave.send_off: group: <group_id>` — Transmits OFF command burst
 - `litewave.send_dim_plus: group: <group_id>` — Transmits DIM+ brightness up command burst
 - `litewave.send_dim_minus: group: <group_id>` — Transmits DIM- brightness down command burst
-- `litewave.provision_light: group: <group_id>, light_index: <index>` — Runs on-device SRP-6a provisioning over UDP to push the group's `shared_secret` to the light.
+- `litewave.provision_light: light_id: <light_id>` — Runs on-device SRP-6a provisioning over UDP to push the assigned group's `shared_secret` and switch ACL to the light.
 
 ---
 

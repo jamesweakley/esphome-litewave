@@ -164,32 +164,46 @@ void LitewaveComponent::send_dim_minus(LitewaveGroup *group) {
     transmit_command(group->get_dim_minus_sequence(), group->get_dim_minus_token());
 }
 
-void LitewaveComponent::provision_light(LitewaveGroup *group, int light_index) {
-    if (light_index < 0 || light_index >= (int) group->get_lights().size()) {
-        ESP_LOGE(TAG, "Light index %d out of range (group has %d lights)",
-                 light_index, group->get_lights().size());
+void LitewaveComponent::provision_light(const std::string &light_id) {
+    LitewaveGroup *target_group = nullptr;
+    const LightInfo *target_light = nullptr;
+
+    for (auto *group : groups_) {
+        for (const auto &light : group->get_lights()) {
+            if (light.id == light_id || light.name == light_id) {
+                target_group = group;
+                target_light = &light;
+                break;
+            }
+        }
+        if (target_light) break;
+    }
+
+    if (!target_light || !target_group) {
+        ESP_LOGE(TAG, "Light '%s' not found in any configured group", light_id.c_str());
         return;
     }
-    if (group->get_shared_secret_len() == 0) {
-        ESP_LOGE(TAG, "No shared_secret configured for this group");
+
+    if (target_group->get_shared_secret_len() == 0) {
+        ESP_LOGE(TAG, "No shared_secret configured for the group containing light '%s'", light_id.c_str());
         return;
     }
-    const auto &light = group->get_lights()[light_index];
-    std::string light_name = light.name.empty() ? (light.id.empty() ? "Light" : light.id) : light.name;
-    std::string target_host = !light.host.empty() ? light.host : light.id;
+
+    std::string light_name = target_light->name.empty() ? (target_light->id.empty() ? "Light" : target_light->id) : target_light->name;
+    std::string target_host = !target_light->host.empty() ? target_light->host : target_light->id;
     ESP_LOGI(TAG, "Provisioning light '%s' at %s", light_name.c_str(), target_host.c_str());
 
     bool ok = provision_light_sync(
         target_host,
-        light.pairing_code,
+        target_light->pairing_code,
         light_name,
-        group->get_shared_secret(),
-        group->get_shared_secret_len(),
+        target_group->get_shared_secret(),
+        target_group->get_shared_secret_len(),
         pan_id_,
         channel_,
         admin_key_,
-        group->get_acl_payload(),
-        group->get_acl_len()
+        target_group->get_acl_payload(),
+        target_group->get_acl_len()
     );
     if (ok) {
         ESP_LOGI(TAG, "Provisioning succeeded for '%s'", light_name.c_str());

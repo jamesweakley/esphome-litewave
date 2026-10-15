@@ -122,7 +122,7 @@ class LitewaveComponent : public Component {
     void send_dim_plus(LitewaveGroup *group);
     void send_dim_minus(LitewaveGroup *group);
 
-    void provision_light(LitewaveGroup *group, int light_index);
+    void provision_light(const std::string &light_id);
 
     // Called from ISR context via C callback trampolines
     void on_tx_done(bool success);
