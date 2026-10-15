@@ -227,6 +227,11 @@ async def to_code(config):
     esp32.add_idf_sdkconfig_option("CONFIG_IEEE802154_RX_BUFFER_SIZE", 20)
     esp32.add_idf_sdkconfig_option("CONFIG_ESP_COEX_ENABLED", True)
     esp32.add_idf_sdkconfig_option("CONFIG_ESP_COEX_SW_COEXIST_ENABLE", True)
+    # IPv6 SLAAC & Multicast for Thread Border Router mDNS
+    esp32.add_idf_sdkconfig_option("CONFIG_LWIP_IPV6", True)
+    esp32.add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_AUTOCONFIG", True)
+    esp32.add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_DHCP6", True)
+    esp32.add_idf_sdkconfig_option("CONFIG_LWIP_IPV6_NUM_ADDRESSES", 4)
     # mbedTLS config for LTPDU v3 SRP-6a + AES-CCM provisioning
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_CCM_C", True)
     esp32.add_idf_sdkconfig_option("CONFIG_MBEDTLS_MPI_MAX_SIZE", 512)

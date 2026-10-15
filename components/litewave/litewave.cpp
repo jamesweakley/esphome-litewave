@@ -296,6 +296,14 @@ static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &ou
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (netif) {
         esp_netif_create_ip6_linklocal(netif);
+        esp_ip6_addr_t ip6_addrs[4];
+        int num_addrs = esp_netif_get_all_ip6(netif, ip6_addrs);
+        ESP_LOGI(TAG, "ESP32 has %d IPv6 address(es) on Wi-Fi interface:", num_addrs);
+        for (int i = 0; i < num_addrs; i++) {
+            char ip6_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &ip6_addrs[i], ip6_str, sizeof(ip6_str));
+            ESP_LOGI(TAG, "  [%d] %s", i, ip6_str);
+        }
     }
 
     esp_err_t err = mdns_init();
