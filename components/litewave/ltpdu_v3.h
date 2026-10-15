@@ -588,6 +588,12 @@ class UdpTransport {
         ::setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         if (is_ipv6) {
+            struct sockaddr_in6 local_addr6{};
+            local_addr6.sin6_family = AF_INET6;
+            local_addr6.sin6_port = htons(0);
+            local_addr6.sin6_addr = in6addr_any;
+            ::bind(sock_, (struct sockaddr *)&local_addr6, sizeof(local_addr6));
+
             memset(&addr6_, 0, sizeof(addr6_));
             addr6_.sin6_family = AF_INET6;
             addr6_.sin6_port = htons(port_);
