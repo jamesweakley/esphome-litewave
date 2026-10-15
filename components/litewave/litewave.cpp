@@ -295,7 +295,7 @@ static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &ou
     // Ensure IPv6 link-local is created on default WiFi station interface for Thread mDNS multicast
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (netif) {
-        esp_netif_create_ip6_link_local(netif);
+        esp_netif_create_ip6_linklocal(netif);
     }
 
     esp_err_t err = mdns_init();
