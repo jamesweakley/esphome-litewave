@@ -1,6 +1,7 @@
 #include "litewave.h"
 #include "ltpdu_v3.h"
 #include "mdns.h"
+#include "esp_netif.h"
 
 namespace esphome {
 namespace litewave {
@@ -291,18 +292,31 @@ static bool query_and_match_mdns(const char *service_type, const char *proto,
 }
 
 static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &out) {
+    // Ensure IPv6 link-local is created on default WiFi station interface for Thread mDNS multicast
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif) {
+        esp_netif_create_ip6_link_local(netif);
+    }
+
     esp_err_t err = mdns_init();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "mdns_init: %d", err);
     }
 
-    // 1. Try _ltpdu._udp (10-second timeout)
-    if (query_and_match_mdns("_ltpdu", "_udp", 10000, target_id, out)) {
+    // 1. Try _ltpdu._udp (20-second timeout for Thread mesh mDNS propagation)
+    ESP_LOGI(TAG, "Querying _ltpdu._udp (20s timeout)...");
+    if (query_and_match_mdns("_ltpdu", "_udp", 20000, target_id, out)) {
         return true;
     }
 
-    // 2. Fallback: try _nanoleafapi._tcp
-    ESP_LOGI(TAG, "Checking fallback service _nanoleafapi._tcp...");
+    // 2. Fallback: try _nanoleafms._udp
+    ESP_LOGI(TAG, "Checking fallback service _nanoleafms._udp (5s timeout)...");
+    if (query_and_match_mdns("_nanoleafms", "_udp", 5000, target_id, out)) {
+        return true;
+    }
+
+    // 3. Fallback: try _nanoleafapi._tcp
+    ESP_LOGI(TAG, "Checking fallback service _nanoleafapi._tcp (5s timeout)...");
     if (query_and_match_mdns("_nanoleafapi", "_tcp", 5000, target_id, out)) {
         return true;
     }
