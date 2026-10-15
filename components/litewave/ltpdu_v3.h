@@ -736,6 +736,20 @@ class LtpduV3Session {
         if (resp2.empty()) { ESP_LOGE(LTPDU_TAG, "Step 2: no response"); return false; }
 
         auto tlvs2 = parse_auth_tlvs(resp2.data(), resp2.size());
+        auto *err_tlv = find_auth_tlv(tlvs2, AUTH_ERROR);
+        if (err_tlv && !err_tlv->empty()) {
+            uint8_t err_code = (*err_tlv)[0];
+            const char *err_msg = "Unknown error";
+            if (err_code == 1) err_msg = "Client ID Not Found";
+            else if (err_code == 2) err_msg = "Verification Failed (Incorrect pairing code or expired commissioning window)";
+            else if (err_code == 3) err_msg = "Max Pairings Reached (All pairing slots on light are full — power cycle 5 times to reset)";
+            else if (err_code == 4) err_msg = "Public Key Not Sent";
+            else if (err_code == 5) err_msg = "Bad Request";
+            else if (err_code == 6) err_msg = "Auth Token Not Found";
+            ESP_LOGE(LTPDU_TAG, "Step 2 rejected by light: %s (code %d)", err_msg, err_code);
+            return false;
+        }
+
         auto *M2 = find_auth_tlv(tlvs2, VERIFICATION);
         if (!M2) { ESP_LOGE(LTPDU_TAG, "Step 2: missing M2"); return false; }
         if (!srp.verify_server_proof(M2->data(), M2->size())) {
