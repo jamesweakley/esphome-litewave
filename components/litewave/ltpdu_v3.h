@@ -701,7 +701,7 @@ class LtpduV3Session {
             if (c >= '0' && c <= '9') password.push_back(c - '0');
         }
 
-        ESP_LOGI(LTPDU_TAG, "SRP auth as '%s'", username.c_str());
+        ESP_LOGI(LTPDU_TAG, "SRP auth as '%s' (%d digits)", username.c_str(), (int)password.size());
 
         SRP6aClient srp(username, password.data(), password.size());
         auto A_bytes = srp.get_public_key_bytes();
