@@ -376,6 +376,11 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
         ESP_LOGE(TAG, "No pairing code available for light '%s' (not in YAML and none provided in service call)", light_id.c_str());
         return;
     }
+    if (!override_pairing_code.empty()) {
+        ESP_LOGI(TAG, "Using dynamic pairing code provided from service call");
+    } else {
+        ESP_LOGI(TAG, "Using static pairing code from YAML configuration");
+    }
 
     std::string light_name = target_light->name.empty() ? (target_light->id.empty() ? "Light" : target_light->id) : target_light->name;
     std::string srp_service_name = !target_light->id.empty() ? ("Nanoleaf DL " + target_light->id) : light_name;

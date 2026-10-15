@@ -638,7 +638,10 @@ class UdpTransport {
                 ESP_LOGD(LTPDU_TAG, "sendto() sent %d bytes to %s:%d", (int)sent, host_.c_str(), port_);
             }
             int n = ::recvfrom(sock_, resp_buf, resp_max, 0, nullptr, nullptr);
-            if (n > 0) return n;
+            if (n > 0) {
+                ESP_LOGI(LTPDU_TAG, "recvfrom() received %d bytes from %s:%d", n, host_.c_str(), port_);
+                return n;
+            }
             ESP_LOGW(LTPDU_TAG, "UDP timeout (attempt %d/%d)", attempt + 1, retries);
         }
         return -1;
