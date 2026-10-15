@@ -204,91 +204,102 @@ struct DiscoveredLight {
 };
 
 static bool query_and_match_mdns(const char *service_type, const char *proto,
-                                  uint32_t timeout_ms, const std::string &target_id,
+                                  uint32_t total_timeout_ms, const std::string &target_id,
                                   DiscoveredLight &out) {
-    mdns_result_t *results = nullptr;
-    esp_err_t err = mdns_query_ptr(service_type, proto, timeout_ms, 20, &results);
-    if (err != ESP_OK || !results) {
-        ESP_LOGD(TAG, "mDNS query for %s.%s returned no results (err=%d)", service_type, proto, err);
-        return false;
-    }
-
     std::string target_upper = target_id;
     for (auto &c : target_upper) c = toupper((unsigned char)c);
 
-    bool found = false;
-    mdns_result_t *r = results;
-    int count = 0;
-    while (r) {
-        count++;
-        std::string inst = r->instance_name ? r->instance_name : "";
-        std::string inst_upper = inst;
-        for (auto &c : inst_upper) c = toupper((unsigned char)c);
+    int64_t start_time = esp_timer_get_time() / 1000;
+    std::vector<std::string> seen_instances;
 
-        ESP_LOGI(TAG, "  Found mDNS device: '%s'", inst.c_str());
+    while ((esp_timer_get_time() / 1000) - start_time < total_timeout_ms) {
+        int64_t elapsed = (esp_timer_get_time() / 1000) - start_time;
+        uint32_t remaining = total_timeout_ms > elapsed ? (total_timeout_ms - elapsed) : 0;
+        if (remaining == 0) break;
+        uint32_t slice_timeout = remaining > 3000 ? 3000 : remaining;
 
-        // Check if instance name ends with target_id, contains " <target_id>", or contains target_id
-        bool match = false;
-        if (inst_upper == target_upper ||
-            inst_upper.find(" " + target_upper) != std::string::npos ||
-            inst_upper.find("-" + target_upper) != std::string::npos ||
-            (inst_upper.length() >= target_upper.length() &&
-             inst_upper.rfind(target_upper) == inst_upper.length() - target_upper.length()) ||
-            inst_upper.find(target_upper) != std::string::npos) {
-            match = true;
-        }
+        mdns_result_t *results = nullptr;
+        esp_err_t err = mdns_query_ptr(service_type, proto, slice_timeout, 255, &results);
+        if (err == ESP_OK && results) {
+            mdns_result_t *r = results;
+            while (r) {
+                std::string inst = r->instance_name ? r->instance_name : "";
+                std::string inst_upper = inst;
+                for (auto &c : inst_upper) c = toupper((unsigned char)c);
 
-        // Also check TXT properties
-        for (size_t t = 0; t < r->txt_count && !match; t++) {
-            std::string key = r->txt[t].key ? r->txt[t].key : "";
-            std::string val = r->txt[t].value ? r->txt[t].value : "";
-            std::string val_upper = val;
-            for (auto &c : val_upper) c = toupper((unsigned char)c);
-
-            if ((key == "id" || key == "eui64" || key == "eui") &&
-                (val_upper == target_upper ||
-                 (val_upper.length() >= target_upper.length() &&
-                  val_upper.rfind(target_upper) == val_upper.length() - target_upper.length()) ||
-                 val_upper.find(target_upper) != std::string::npos)) {
-                match = true;
-                break;
-            }
-        }
-
-        if (match && !found) {
-            mdns_ip_addr_t *a = r->addr;
-            while (a) {
-                char ip_buf[INET6_ADDRSTRLEN];
-                if (a->addr.type == ESP_IPADDR_TYPE_V6) {
-                    inet_ntop(AF_INET6, &(a->addr.u_addr.ip6), ip_buf, sizeof(ip_buf));
-                    out.ip = ip_buf;
-                    break;
-                } else if (a->addr.type == ESP_IPADDR_TYPE_V4) {
-                    inet_ntop(AF_INET, &(a->addr.u_addr.ip4), ip_buf, sizeof(ip_buf));
-                    out.ip = ip_buf;
+                bool already_seen = false;
+                for (const auto &s : seen_instances) {
+                    if (s == inst) { already_seen = true; break; }
                 }
-                a = a->next;
-            }
-            if (!out.ip.empty()) {
-                out.port = r->port != 0 ? r->port : 12566;
-                out.instance_name = inst;
-                found = true;
-                ESP_LOGI(TAG, "  -> Matched target '%s': IP=%s:%d", target_id.c_str(), out.ip.c_str(), out.port);
-                for (size_t t = 0; t < r->txt_count; t++) {
+                if (!already_seen && !inst.empty()) {
+                    seen_instances.push_back(inst);
+                    ESP_LOGI(TAG, "  Found mDNS device: '%s'", inst.c_str());
+                }
+
+                // Check if instance name ends with target_id, contains " <target_id>", or contains target_id
+                bool match = false;
+                if (inst_upper == target_upper ||
+                    inst_upper.find(" " + target_upper) != std::string::npos ||
+                    inst_upper.find("-" + target_upper) != std::string::npos ||
+                    (inst_upper.length() >= target_upper.length() &&
+                     inst_upper.rfind(target_upper) == inst_upper.length() - target_upper.length()) ||
+                    inst_upper.find(target_upper) != std::string::npos) {
+                    match = true;
+                }
+
+                // Also check TXT properties
+                for (size_t t = 0; t < r->txt_count && !match; t++) {
                     std::string key = r->txt[t].key ? r->txt[t].key : "";
                     std::string val = r->txt[t].value ? r->txt[t].value : "";
-                    ESP_LOGI(TAG, "     TXT %s=%s", key.c_str(), val.c_str());
+                    std::string val_upper = val;
+                    for (auto &c : val_upper) c = toupper((unsigned char)c);
+
+                    if ((key == "id" || key == "eui64" || key == "eui") &&
+                        (val_upper == target_upper ||
+                         (val_upper.length() >= target_upper.length() &&
+                          val_upper.rfind(target_upper) == val_upper.length() - target_upper.length()) ||
+                         val_upper.find(target_upper) != std::string::npos)) {
+                        match = true;
+                        break;
+                    }
                 }
+
+                if (match) {
+                    mdns_ip_addr_t *a = r->addr;
+                    while (a) {
+                        char ip_buf[INET6_ADDRSTRLEN];
+                        if (a->addr.type == ESP_IPADDR_TYPE_V6) {
+                            inet_ntop(AF_INET6, &(a->addr.u_addr.ip6), ip_buf, sizeof(ip_buf));
+                            out.ip = ip_buf;
+                            break;
+                        } else if (a->addr.type == ESP_IPADDR_TYPE_V4) {
+                            inet_ntop(AF_INET, &(a->addr.u_addr.ip4), ip_buf, sizeof(ip_buf));
+                            out.ip = ip_buf;
+                        }
+                        a = a->next;
+                    }
+                    if (!out.ip.empty()) {
+                        out.port = r->port != 0 ? r->port : 12566;
+                        out.instance_name = inst;
+                        ESP_LOGI(TAG, "  -> Matched target '%s': IP=%s:%d", target_id.c_str(), out.ip.c_str(), out.port);
+                        for (size_t t = 0; t < r->txt_count; t++) {
+                            std::string key = r->txt[t].key ? r->txt[t].key : "";
+                            std::string val = r->txt[t].value ? r->txt[t].value : "";
+                            ESP_LOGI(TAG, "     TXT %s=%s", key.c_str(), val.c_str());
+                        }
+                        mdns_query_results_free(results);
+                        return true;
+                    }
+                }
+                r = r->next;
             }
+            mdns_query_results_free(results);
         }
-        r = r->next;
     }
 
-    ESP_LOGI(TAG, "mDNS %s.%s query finished (%d devices found, matched=%s)",
-             service_type, proto, count, found ? "YES" : "NO");
-
-    mdns_query_results_free(results);
-    return found;
+    ESP_LOGI(TAG, "mDNS %s.%s query finished (%d unique devices found, matched=%s)",
+             service_type, proto, (int)seen_instances.size(), "NO");
+    return false;
 }
 
 static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &out) {
