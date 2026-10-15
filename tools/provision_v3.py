@@ -213,6 +213,21 @@ def main():
         help="Raw hex string for ACL payload (overrides auto-calculation from --switch-eui)",
     )
     parser.add_argument(
+        "--host",
+        help="Direct target IP or hostname (skips mDNS discovery)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=12566,
+        help="Target port when using --host (default 12566)",
+    )
+    parser.add_argument(
+        "--name",
+        dest="service_name",
+        help="mDNS service name of the light (e.g. 'Nanoleaf DL 655-76C8' or 'Nanoleaf DL 655')",
+    )
+    parser.add_argument(
         "--unpair-token",
         help="One-off action: authenticate with this existing auth_token and immediately send unpair to free its slot",
     )
@@ -229,60 +244,74 @@ def main():
     )
     args = parser.parse_args()
 
-    # ── Step 1: Discover Local Lights via mDNS ──────────────────────────────
-    print(f"Discovering Nanoleaf lights via mDNS ({args.timeout:.0f}s)...")
-    all_discovered = discover_lights(timeout=args.timeout)
-    if not all_discovered:
-        print("No Nanoleaf lights found on the network via mDNS.")
-        print("Make sure the lights are powered on and on the same Thread/WiFi network.")
-        return
-
-    print(f"\nDiscovered {len(all_discovered)} light(s) on local network:")
-    print(f"  {'#':<3} {'ID':<6} {'Service Name':<28} {'Model':<6} {'EUI64':<18} {'IP Host'}")
-    print("  " + "─" * 78)
-    for i, l in enumerate(all_discovered):
-        eui_display = l["eui64"] if l["eui64"] else "(none)"
-        print(f"  [{i}] {l['id']:<6} {l['name']:<28} {l['model']:<6} {eui_display:<18} {l['host']}")
-    print()
-
-    # ── Step 2: Filter Target Lights by 3-character ID ──────────────────────
-    if args.light_ids:
-        wanted_ids = [x.strip().upper() for x in args.light_ids.split(",") if x.strip()]
-        targets = [l for l in all_discovered if l["id"] in wanted_ids]
-        if not targets:
-            print(f"None of the discovered lights match ID(s): {', '.join(wanted_ids)}")
-            return
-        print(f"Selected {len(targets)} light(s) matching ID filter: {', '.join(wanted_ids)}")
+    # ── Step 1: Discover or Direct Target ──────────────────────────────────
+    if args.host:
+        light_id = args.light_ids.split(",")[0].strip().upper() if args.light_ids else "TARGET"
+        svc_name = args.service_name or f"Nanoleaf DL {light_id}"
+        targets = [{
+            "id": light_id,
+            "name": svc_name,
+            "host": args.host,
+            "port": args.port,
+            "model": "NL65",
+            "eui64": "",
+            "raw_props": {},
+        }]
+        print(f"Using direct target light: {svc_name} at {args.host}:{args.port}")
     else:
-        while True:
-            try:
-                choice = input("Enter 3-character light ID(s) from back of light (e.g. '789' or '789,1D9', or 'all'): ").strip()
-                if not choice:
-                    print("No selection made. Aborting.")
-                    return
-                if choice.lower() == "all":
-                    confirm = input("⚠️  WARNING: You chose ALL lights. Are you sure you want to write to all lights? [y/N]: ").strip().lower()
-                    if confirm in ("y", "yes"):
-                        targets = all_discovered
-                        break
-                    else:
-                        continue
+        print(f"Discovering Nanoleaf lights via mDNS ({args.timeout:.0f}s)...")
+        all_discovered = discover_lights(timeout=args.timeout)
+        if not all_discovered:
+            print("No Nanoleaf lights found on the network via mDNS.")
+            print("Make sure the lights are powered on and on the same Thread/WiFi network.")
+            return
 
-                selected_tokens = [x.strip().upper() for x in choice.split(",") if x.strip()]
-                targets = []
-                for tok in selected_tokens:
-                    if tok.isdigit() and 0 <= int(tok) < len(all_discovered):
-                        targets.append(all_discovered[int(tok)])
-                    else:
-                        matched = [l for l in all_discovered if l["id"] == tok]
-                        targets.extend(matched)
+        print(f"\nDiscovered {len(all_discovered)} light(s) on local network:")
+        print(f"  {'#':<3} {'ID':<6} {'Service Name':<28} {'Model':<6} {'EUI64':<18} {'IP Host'}")
+        print("  " + "─" * 78)
+        for i, l in enumerate(all_discovered):
+            eui_display = l["eui64"] if l["eui64"] else "(none)"
+            print(f"  [{i}] {l['id']:<6} {l['name']:<28} {l['model']:<6} {eui_display:<18} {l['host']}")
+        print()
 
-                if targets:
-                    break
-                print("No matching lights found for that selection. Try again.")
-            except (KeyboardInterrupt, EOFError):
-                print("\nAborted.")
+        # ── Step 2: Filter Target Lights by 3-character ID ──────────────────────
+        if args.light_ids:
+            wanted_ids = [x.strip().upper() for x in args.light_ids.split(",") if x.strip()]
+            targets = [l for l in all_discovered if l["id"] in wanted_ids]
+            if not targets:
+                print(f"None of the discovered lights match ID(s): {', '.join(wanted_ids)}")
                 return
+            print(f"Selected {len(targets)} light(s) matching ID filter: {', '.join(wanted_ids)}")
+        else:
+            while True:
+                try:
+                    choice = input("Enter 3-character light ID(s) from back of light (e.g. '789' or '789,1D9', or 'all'): ").strip()
+                    if not choice:
+                        print("No selection made. Aborting.")
+                        return
+                    if choice.lower() == "all":
+                        confirm = input("⚠️  WARNING: You chose ALL lights. Are you sure you want to write to all lights? [y/N]: ").strip().lower()
+                        if confirm in ("y", "yes"):
+                            targets = all_discovered
+                            break
+                        else:
+                            continue
+
+                    selected_tokens = [x.strip().upper() for x in choice.split(",") if x.strip()]
+                    targets = []
+                    for tok in selected_tokens:
+                        if tok.isdigit() and 0 <= int(tok) < len(all_discovered):
+                            targets.append(all_discovered[int(tok)])
+                        else:
+                            matched = [l for l in all_discovered if l["id"] == tok]
+                            targets.extend(matched)
+
+                    if targets:
+                        break
+                    print("No matching lights found for that selection. Try again.")
+                except (KeyboardInterrupt, EOFError):
+                    print("\nAborted.")
+                    return
 
     # ── Handle Direct Unpair Request ─────────────────────────────────────────
     if args.unpair_token:
@@ -376,18 +405,34 @@ def main():
 
             # Auto-detect switches for ACL if not manually specified
             if not acl_payload:
-                cloud_switches = [d for d in cloud_devices if d.get("model") == "NL44" and not d.get("deleted")]
+                cloud_switches = [
+                    d for d in cloud_devices
+                    if d.get("model") == "NL44" and not d.get("deleted") and d.get("eui64")
+                ]
                 if cloud_switches:
-                    print(f"\nFound {len(cloud_switches)} Sense+ switch(es) in Nanoleaf Cloud:")
-                    found_euis = []
-                    for s in cloud_switches:
-                        eui = s.get("eui64")
-                        print(f"  - {s['name']} (EUI: {eui or 'unknown'})")
-                        if eui:
-                            found_euis.append(eui)
+                    if len(cloud_switches) == 1:
+                        found_euis = [cloud_switches[0]["eui64"]]
+                        print(f"\nAuto-selected only Sense+ switch in home: {cloud_switches[0]['name']} (EUI: {found_euis[0]})")
+                    else:
+                        print(f"\nMultiple ({len(cloud_switches)}) Sense+ switch(es) found in Nanoleaf Cloud:")
+                        for idx, s in enumerate(cloud_switches, 1):
+                            print(f"  [{idx}] {s['name']:28s} EUI: {s['eui64']}")
+                        while True:
+                            try:
+                                choice = input(f"Select which switch to authorize for this group [1-{len(cloud_switches)}, or 'all']: ").strip()
+                                if choice.lower() == "all":
+                                    found_euis = [s["eui64"] for s in cloud_switches]
+                                    break
+                                elif choice.isdigit() and 1 <= int(choice) <= len(cloud_switches):
+                                    found_euis = [cloud_switches[int(choice) - 1]["eui64"]]
+                                    break
+                            except (KeyboardInterrupt, EOFError):
+                                print("\nAborted.")
+                                return
+
                     if found_euis:
                         acl_payload = build_acl_payload(found_euis)
-                        print(f"  -> Auto-generated ACL for {len(found_euis)} switch(es): {acl_payload.hex()}")
+                        print(f"  -> Generated ACL for {len(found_euis)} switch(es): {acl_payload.hex()}")
 
         except Exception as e:
             print(f"❌ Failed to retrieve tokens from Nanoleaf Cloud: {e}")

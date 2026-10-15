@@ -982,12 +982,45 @@ def main():
                         channel_val = home_cfg.get("channel")
                     if not switch_eui:
                         cloud_devs = cloud_client.get_devices()
-                        for cd in cloud_devs:
-                            if cd.get("eui64") and (cd.get("name") == args.switch_name or cd.get("model") == "NL44"):
-                                switch_eui = cd["eui64"]
-                                break
+                        switches = [
+                            cd for cd in cloud_devs
+                            if cd.get("eui64") and cd.get("model") == "NL44" and not cd.get("deleted")
+                        ]
+                        if args.switch_name:
+                            matched = [
+                                s for s in switches
+                                if args.switch_name.lower() in s.get("name", "").lower()
+                            ]
+                            if matched:
+                                switch_eui = matched[0]["eui64"]
+                                print(f"  Matched switch '{matched[0]['name']}' (EUI: {switch_eui})")
+
+                        if not switch_eui and switches:
+                            if len(switches) == 1:
+                                switch_eui = switches[0]["eui64"]
+                                print(f"  Auto-selected only Sense+ switch in home: '{switches[0]['name']}' (EUI: {switch_eui})")
+                            else:
+                                print(f"\nMultiple ({len(switches)}) Sense+ switches found in Nanoleaf Cloud:")
+                                for idx, s in enumerate(switches, 1):
+                                    print(f"    [{idx}] {s['name']:28s} EUI: {s['eui64']}")
+                                while True:
+                                    try:
+                                        choice = input(f"  Select which switch you are capturing from [1-{len(switches)}]: ").strip()
+                                        if choice.isdigit() and 1 <= int(choice) <= len(switches):
+                                            switch_eui = switches[int(choice) - 1]["eui64"]
+                                            break
+                                    except (KeyboardInterrupt, EOFError):
+                                        print("\nAborted.")
+                                        sys.exit(1)
                 except Exception:
                     pass
+
+        if not switch_eui:
+            try:
+                switch_eui = input("Enter 16-hex Sense+ Switch EUI-64 (from device info, e.g. 'e406bffffed47797'): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nAborted.")
+                sys.exit(1)
 
         if not pan_id_hex:
             pan_id_hex = input("Enter Nanoleaf Home PAN ID (hex, e.g. from Nanoleaf app/cloud): ").strip()
