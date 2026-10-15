@@ -369,6 +369,7 @@ void LitewaveComponent::run_provision_task(const std::string &light_id) {
     }
 
     std::string light_name = target_light->name.empty() ? (target_light->id.empty() ? "Light" : target_light->id) : target_light->name;
+    std::string srp_service_name = !target_light->id.empty() ? ("Nanoleaf DL " + target_light->id) : light_name;
     std::string target_host = target_light->host;
     uint16_t target_port = 12566;
 
@@ -379,24 +380,24 @@ void LitewaveComponent::run_provision_task(const std::string &light_id) {
         if (resolve_light_mdns(lookup_id, disc)) {
             target_host = disc.ip;
             target_port = disc.port;
-            if (target_light->name.empty() && !disc.instance_name.empty()) {
-                light_name = disc.instance_name;
+            if (!disc.instance_name.empty()) {
+                srp_service_name = disc.instance_name;
             }
-            ESP_LOGI(TAG, "mDNS resolved light '%s' to %s:%d (%s)",
-                     lookup_id.c_str(), target_host.c_str(), target_port, light_name.c_str());
+            ESP_LOGI(TAG, "mDNS resolved light '%s' to %s:%d (service '%s')",
+                     lookup_id.c_str(), target_host.c_str(), target_port, srp_service_name.c_str());
         } else {
             ESP_LOGE(TAG, "Could not resolve light '%s' via mDNS and no 'host' specified in YAML", light_id.c_str());
             return;
         }
     }
 
-    ESP_LOGI(TAG, "Provisioning light '%s' at %s:%d", light_name.c_str(), target_host.c_str(), target_port);
+    ESP_LOGI(TAG, "Provisioning light '%s' (%s) at %s:%d", light_name.c_str(), srp_service_name.c_str(), target_host.c_str(), target_port);
 
     bool ok = provision_light_sync(
         target_host,
         target_port,
         target_light->pairing_code,
-        light_name,
+        srp_service_name,
         target_group->get_shared_secret(),
         target_group->get_shared_secret_len(),
         pan_id_,

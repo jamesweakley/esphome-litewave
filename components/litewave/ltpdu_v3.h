@@ -568,7 +568,7 @@ inline const char *describe_ltpdu_code(uint8_t code) {
 
 class UdpTransport {
  public:
-    UdpTransport(const std::string &host, uint16_t port, float timeout_s = 5.0f)
+    UdpTransport(const std::string &host, uint16_t port, float timeout_s = 8.0f)
         : host_(host), port_(port), timeout_s_(timeout_s), sock_(-1) {}
 
     ~UdpTransport() { close(); }
@@ -625,7 +625,7 @@ class UdpTransport {
     }
 
     int send_recv(const uint8_t *data, size_t len,
-                  uint8_t *resp_buf, size_t resp_max, int retries = 3) {
+                  uint8_t *resp_buf, size_t resp_max, int retries = 6) {
         struct sockaddr *addr = is_ipv6_ ? (struct sockaddr *)&addr6_
                                          : (struct sockaddr *)&addr4_;
         socklen_t addr_len = is_ipv6_ ? sizeof(addr6_) : sizeof(addr4_);
