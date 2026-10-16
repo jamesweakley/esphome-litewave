@@ -257,7 +257,15 @@ def _handle_ble_error(e: Exception, stage: str = "BLE operation"):
         print("     - Ensure the switch is actively advertising by holding ON + OFF for 3 seconds until the white LED flashes.")
 
 
-async def write_shared_secret_ble(switch_name, setup_code, shared_secret, pan_id_hex, admin_key_hex, channel_val):
+async def write_shared_secret_ble(
+    switch_name,
+    setup_code,
+    shared_secret,
+    pan_id_hex,
+    admin_key_hex,
+    channel_val,
+    write_radio_params=True,
+):
     """Write sp/ss to the Sense+ switch via BLE. Returns True on success."""
     try:
         from bleak import BleakClient, BleakScanner
@@ -351,17 +359,18 @@ async def write_shared_secret_ble(switch_name, setup_code, shared_secret, pan_id
             await session.start_notifications()
             await asyncio.sleep(0.1)
 
-            # 1. Write sp/admin
-            print(f"  Setting switch Admin Key (0x{admin_clean})...")
-            resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/admin", admin_bytes, method=1))
+            if write_radio_params:
+                # 1. Write sp/admin
+                print(f"  Setting switch Admin Key (0x{admin_clean})...")
+                resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/admin", admin_bytes, method=1))
 
-            # 2. Write sp/pi (PAN ID)
-            print(f"  Setting switch PAN ID (0x{pan_clean})...")
-            resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/pi", pan_bytes, method=1))
+                # 2. Write sp/pi (PAN ID)
+                print(f"  Setting switch PAN ID (0x{pan_clean})...")
+                resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/pi", pan_bytes, method=1))
 
-            # 3. Write sp/mc (Channel)
-            print(f"  Setting switch Channel ({channel_val})...")
-            resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/mc", bytes([channel_val]), method=1))
+                # 3. Write sp/mc (Channel)
+                print(f"  Setting switch Channel ({channel_val})...")
+                resp = await session.send_encrypted(_build_ble_ltpdu_cmd("sp/mc", bytes([channel_val]), method=1))
 
             # 4. Write sp/ss (Shared Secret)
             print(f"  Writing switch sp/ss ({len(shared_secret)} bytes)...")
@@ -375,24 +384,25 @@ async def write_shared_secret_ble(switch_name, setup_code, shared_secret, pan_id
 
             # Verify by reading back
             print("  Verifying switch configuration...")
-            get_admin = _build_ble_ltpdu_cmd("sp/admin", method=0)
-            resp_admin = await session.send_encrypted(get_admin)
-            if resp_admin:
-                _, _, val_admin = _parse_ble_ltpdu_response(resp_admin)
-                print(f"  -> sp/admin: 0x{val_admin.hex() if val_admin else '?'}")
+            if write_radio_params:
+                get_admin = _build_ble_ltpdu_cmd("sp/admin", method=0)
+                resp_admin = await session.send_encrypted(get_admin)
+                if resp_admin:
+                    _, _, val_admin = _parse_ble_ltpdu_response(resp_admin)
+                    print(f"  -> sp/admin: 0x{val_admin.hex() if val_admin else '?'}")
 
-            get_pi = _build_ble_ltpdu_cmd("sp/pi", method=0)
-            resp_pi = await session.send_encrypted(get_pi)
-            if resp_pi:
-                _, _, val_pi = _parse_ble_ltpdu_response(resp_pi)
-                print(f"  -> sp/pi:    0x{val_pi.hex() if val_pi else '?'}")
+                get_pi = _build_ble_ltpdu_cmd("sp/pi", method=0)
+                resp_pi = await session.send_encrypted(get_pi)
+                if resp_pi:
+                    _, _, val_pi = _parse_ble_ltpdu_response(resp_pi)
+                    print(f"  -> sp/pi:    0x{val_pi.hex() if val_pi else '?'}")
 
-            get_mc = _build_ble_ltpdu_cmd("sp/mc", method=0)
-            resp_mc = await session.send_encrypted(get_mc)
-            if resp_mc:
-                _, _, val_mc = _parse_ble_ltpdu_response(resp_mc)
-                ch_num = val_mc[0] if val_mc else '?'
-                print(f"  -> sp/mc:    {ch_num}")
+                get_mc = _build_ble_ltpdu_cmd("sp/mc", method=0)
+                resp_mc = await session.send_encrypted(get_mc)
+                if resp_mc:
+                    _, _, val_mc = _parse_ble_ltpdu_response(resp_mc)
+                    ch_num = val_mc[0] if val_mc else '?'
+                    print(f"  -> sp/mc:    {ch_num}")
 
             get_cmd = _build_ble_ltpdu_cmd("sp/ss", method=0)
             resp = await session.send_encrypted(get_cmd)
@@ -488,6 +498,44 @@ def find_serial_port():
     return select_serial_port(None)
 
 
+def read_raw_packet(ser):
+    """
+    Read one framed packet from the serial port (including channel=0 heartbeat frames).
+    Returns (channel, rssi, lqi, frame_data) or None.
+    """
+    # Look for SYNC_BYTE
+    while True:
+        b = ser.read(1)
+        if len(b) == 0:
+            return None
+        if b[0] == SYNC_BYTE:
+            break
+
+    raw_len = ser.read(1)
+    if len(raw_len) == 0:
+        return None
+    total_len = raw_len[0]
+    if total_len < 4 or total_len > 130:
+        return None
+
+    remaining = ser.read(total_len + 1)
+    if len(remaining) < total_len + 1:
+        return None
+
+    chk = total_len
+    for i in range(total_len):
+        chk ^= remaining[i]
+    if (chk & 0xFF) != remaining[total_len]:
+        return None
+
+    channel = remaining[0]
+    rssi = struct.unpack_from("b", remaining, 1)[0]
+    lqi = remaining[2]
+    frame_data = bytes(remaining[3:total_len])
+
+    return channel, rssi, lqi, frame_data
+
+
 def detect_firmware(ser):
     """
     Probe the serial port to identify the firmware running on the ESP32.
@@ -495,46 +543,36 @@ def detect_firmware(ser):
     """
     ser.reset_input_buffer()
 
-    # 1. Probe for Transmitter (0xBB with bad params)
-    ser.write(b"\xBB\x00\x00\x00\x00\x00")
+    # 1. Listen for existing stream / probe for Sniffer
+    # Send wake/sync bytes to trigger immediate heartbeat from sniffer
+    ser.write(b"\xAA\n?\n")
     ser.flush()
-    time.sleep(0.15)
+
+    start = time.time()
+    while time.time() - start < 2.0:
+        pkt = read_raw_packet(ser)
+        if pkt is not None:
+            channel, rssi, lqi, frame_data = pkt
+            if channel == 0:
+                # Heartbeat packet from sniffer firmware (CH=0, RSSI=channel, DATA="LWSNIFF\0")
+                if b"LWSNIFF" in frame_data:
+                    return "sniffer", f"channel {rssi}"
+                return "sniffer", "heartbeat detected"
+            elif 11 <= channel <= 26:
+                return "sniffer", f"channel {channel}"
+
+    # 2. Check for Transmitter (0xBB command format)
+    ser.reset_input_buffer()
+    ser.write(b"\xBB\x00\x00\x00\x00\x00\n")
+    ser.flush()
+    time.sleep(0.2)
     resp = ser.read(1024)
 
     if b"ERR:BAD_PARAMS" in resp or b"LITEWAVE_TX_READY" in resp:
         return "transmitter", "Litewave Transmitter"
 
-    # 2. Probe for Sniffer (send 0xAA probe byte to trigger heartbeat)
-    ser.write(b"\xAA")
-    ser.flush()
-
-    start = time.time()
-    buf = bytearray()
-    while time.time() - start < 1.2:
-        b = ser.read(ser.in_waiting or 1)
-        if b:
-            buf.extend(b)
-            # Look for 0xAA sync byte in buffer
-            idx = buf.find(SYNC_BYTE)
-            if idx >= 0 and len(buf) >= idx + 2:
-                total_len = buf[idx + 1]
-                if len(buf) >= idx + 2 + total_len:
-                    pkt = buf[idx : idx + 2 + total_len]
-                    # Verify checksum
-                    chk = total_len
-                    for byte in pkt[2:]:
-                        chk ^= byte
-                    if (chk & 0xFF) == 0:
-                        ch = pkt[2]
-                        if ch == 0 and b"LWSNIFF" in pkt:
-                            channel_locked = pkt[3]
-                            return "sniffer", f"channel {channel_locked}"
-                        elif ch >= 11 and ch <= 26:
-                            return "sniffer", f"active frames on ch {ch}"
-        time.sleep(0.05)
-
     try:
-        text = buf.decode("utf-8", errors="ignore")
+        text = resp.decode("utf-8", errors="ignore")
         if any(marker in text for marker in ["[I][", "[D][", "[E][", "[W][", "ESP-ROM", "rst:", "boot:"]):
             return "esphome_or_idf", "ESPHome / custom firmware"
     except Exception:
@@ -653,95 +691,45 @@ def verify_sniffer_firmware(ser, port, auto_flash=False):
 
 
 def read_frame(ser):
-    while True:
-        b = ser.read(1)
-        if len(b) == 0:
-            return None
-        if b[0] == SYNC_BYTE:
-            break
-
-    raw_len = ser.read(1)
-    if len(raw_len) == 0:
+    pkt = read_raw_packet(ser)
+    if pkt is None:
         return None
-    total_len = raw_len[0]
-    if total_len < 4 or total_len > 130:
-        return None
-
-    remaining = ser.read(total_len + 1)
-    if len(remaining) < total_len + 1:
-        return None
-
-    chk = total_len
-    for i in range(total_len):
-        chk ^= remaining[i]
-    if (chk & 0xFF) != remaining[total_len]:
-        return None
-
-    channel = remaining[0]
-    rssi = struct.unpack_from("b", remaining, 1)[0]
-    lqi = remaining[2]
-    frame_data = bytes(remaining[3:total_len])
-
-    # Ignore non-radio heartbeat frames (channel == 0)
+    channel, rssi, lqi, frame_data = pkt
     if channel == 0:
         return None
-
     return channel, rssi, lqi, frame_data
 
 
 def parse_litewave_frame(frame_data, target_pan=None):
     """Parse 802.15.4 frame and extract Litewave (dsn, token_hex) or None."""
-    if len(frame_data) < 10:
+    # Litewave frames from Sense+ switch are 25 bytes (7B header + 18B payload)
+    if len(frame_data) < 23:
         return None
 
+    # FCF: 0x1801 (data frame, PAN compression, short dst, no src)
     fcf = struct.unpack_from("<H", frame_data, 0)[0]
-    frame_type = fcf & 0x07
-    if frame_type != 1:
+    if fcf != 0x1801:
         return None
 
     dsn = frame_data[2]
-
-    dst_mode = (fcf >> 10) & 0x03
-    src_mode = (fcf >> 14) & 0x03
-    pan_compress = (fcf >> 6) & 0x01
-
-    offset = 3
-
-    if dst_mode == 2:
-        if offset + 4 > len(frame_data):
-            return None
-        dst_pan = struct.unpack_from("<H", frame_data, offset)[0]
-        offset += 2
-        dst_addr = struct.unpack_from("<H", frame_data, offset)[0]
-        offset += 2
-    elif dst_mode == 3:
-        if offset + 10 > len(frame_data):
-            return None
-        dst_pan = struct.unpack_from("<H", frame_data, offset)[0]
-        offset += 2
-        offset += 8
-    else:
-        return None
+    dst_pan = struct.unpack_from("<H", frame_data, 3)[0]
+    dst_addr = struct.unpack_from("<H", frame_data, 5)[0]
 
     if target_pan is not None and dst_pan != target_pan:
         return None
-    if dst_mode == 2 and dst_addr != LITEWAVE_DST:
+
+    # Destination is 0xFFF0
+    if dst_addr != LITEWAVE_DST:
         return None
 
-    if src_mode == 2:
-        if not pan_compress:
-            offset += 2
-        offset += 2
-    elif src_mode == 3:
-        if not pan_compress:
-            offset += 2
-        offset += 8
-
-    payload = frame_data[offset:]
+    payload = frame_data[7:]
     if len(payload) < 16:
         return None
 
-    cmd_type = payload[1]
+    # Sense+ command type is 0x00
+    if payload[1] != 0x00:
+        return None
+
     token = payload[2:16]
 
     return dsn, token.hex().upper()

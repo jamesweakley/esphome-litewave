@@ -48,6 +48,29 @@ from capture_and_provision import (
 )
 
 
+class HexInt(int):
+    """Integer that formats as hexadecimal (e.g. 0xC8) in YAML."""
+    pass
+
+
+def _hexint_representer(dumper, data):
+    return dumper.represent_scalar('tag:yaml.org,2002:int', f"0x{data:02X}")
+
+
+yaml.add_representer(HexInt, _hexint_representer)
+yaml.SafeDumper.add_representer(HexInt, _hexint_representer)
+
+
+def format_shared_secret(secret_bytes: bytes) -> str:
+    """Format shared secret in short hex format (e.g. '0x01') for readability."""
+    hex_str = secret_bytes.hex().lstrip("0")
+    if not hex_str:
+        return "0x00"
+    if len(hex_str) % 2 != 0:
+        hex_str = "0" + hex_str
+    return f"0x{hex_str}"
+
+
 def secret_for_index(i):
     """Generate a deterministic 54-byte shared secret for catalog index i."""
     if i < 256:
@@ -68,19 +91,32 @@ def load_existing_catalog(path):
     return []
 
 
+def parse_secret_int(secret_val) -> int:
+    """Extract numeric value of a shared secret for sorting."""
+    if isinstance(secret_val, int):
+        return secret_val
+    s = str(secret_val).strip().lower()
+    if s.startswith("0x"):
+        s = s[2:]
+    return int(s, 16) if s else 0
+
+
 def save_catalog(path, entries):
-    """Write the full catalog to YAML."""
-    data = {
-        "# Pre-generated Litewave token catalog": None,
-        "# Each entry maps a deterministic shared_secret to its captured tokens.": None,
-        "# Shared secrets are 54 bytes: 53 zero bytes + index byte.": None,
-        "entries": entries,
-    }
-    # Use a cleaner format
+    """Write the full catalog to YAML sorted by numeric shared_secret value."""
+    # Deduplicate entries by shared_secret and sort numerically
+    seen = {}
+    for e in entries:
+        sec = e.get("shared_secret")
+        if sec:
+            val = parse_secret_int(sec)
+            seen[val] = e
+
+    sorted_entries = [seen[k] for k in sorted(seen.keys())]
+
     header = (
         "# Pre-generated Litewave token catalog\n"
         "# Each entry maps a deterministic shared_secret and switch_eui to captured tokens.\n"
-        "# Shared secrets are 54 bytes: 53 zero bytes + index byte.\n"
+        "# Shared secrets are 54 bytes (represented in short form, e.g. 0x01).\n"
         "# Users can pick any entry and skip the manual capture process.\n"
         "#\n"
         "# To use an entry:\n"
@@ -91,7 +127,7 @@ def save_catalog(path, entries):
     )
     with open(path, "w") as f:
         f.write(header)
-        yaml.dump({"entries": entries}, f, default_flow_style=False, sort_keys=False)
+        yaml.dump({"entries": sorted_entries}, f, default_flow_style=False, sort_keys=False)
 
 
 def main():
@@ -159,13 +195,25 @@ def main():
         help="Output file (default: token_catalog.yaml)",
     )
     parser.add_argument(
+        "--auto-flash",
+        action="store_true",
+        help="Automatically flash sniffer firmware if not already running",
+    )
+    parser.add_argument(
         "--debug", action="store_true", help="Show raw sniffer frames"
     )
     args = parser.parse_args()
 
     # Load existing entries for resume support
     existing = load_existing_catalog(args.output)
-    existing_indices = {e["index"] for e in existing}
+    existing_secrets = set()
+    for e in existing:
+        if "shared_secret" in e:
+            s_val = str(e["shared_secret"]).strip().lower()
+            if s_val.startswith("0x"):
+                s_val = s_val[2:]
+            s_val = s_val.rjust(108, "0")
+            existing_secrets.add(s_val)
     print(
         f"Loaded {len(existing)} existing entries from {args.output}"
         if existing
@@ -187,8 +235,10 @@ def main():
     time.sleep(0.5)
     ser.reset_input_buffer()
 
-    if not verify_sniffer_firmware(ser, port):
-        ser.close()
+    ok, ser = verify_sniffer_firmware(ser, port, auto_flash=args.auto_flash)
+    if not ok:
+        if ser:
+            ser.close()
         sys.exit(1)
 
     print(f"Sniffer: {port}")
@@ -199,35 +249,41 @@ def main():
     channel_val = args.channel
     switch_eui = args.switch_eui
 
-    if not pan_id_hex or not admin_key_hex or channel_val is None or not switch_eui:
-        if args.cloud_email and args.cloud_password:
-            try:
-                from nanoleaf_cloud import NanoleafCloudClient
-                cloud_client = NanoleafCloudClient(username=args.cloud_email, password=args.cloud_password)
-                home_cfg = cloud_client.get_home_config()
-                if not pan_id_hex:
-                    pan_id_hex = home_cfg.get("pan_id")
-                if not admin_key_hex:
-                    admin_key_hex = home_cfg.get("admin_key")
-                if channel_val is None:
-                    channel_val = home_cfg.get("channel")
-                if not switch_eui:
-                    cloud_devs = cloud_client.get_devices()
-                    for cd in cloud_devs:
-                        if cd.get("eui64") and (cd.get("name") == args.switch_name or cd.get("model") == "NL44"):
+    # If explicitly passed via arguments, prefer user-specified switch_code / switch_token
+    auth_val = args.switch_token if args.switch_token else args.switch_code
+
+    if args.cloud_email and args.cloud_password:
+        try:
+            from nanoleaf_cloud import NanoleafCloudClient
+            cloud_client = NanoleafCloudClient(username=args.cloud_email, password=args.cloud_password)
+            home_cfg = cloud_client.get_home_config()
+            if not pan_id_hex:
+                pan_id_hex = home_cfg.get("pan_id")
+            if not admin_key_hex:
+                admin_key_hex = home_cfg.get("admin_key")
+            if channel_val is None:
+                channel_val = home_cfg.get("channel")
+
+            if not switch_eui or not auth_val:
+                cloud_devs = cloud_client.get_devices()
+                for cd in cloud_devs:
+                    if (cd.get("name") == args.switch_name) or (not switch_eui and cd.get("model") == "NL44" and not cd.get("deleted")):
+                        if not switch_eui and cd.get("eui64"):
                             switch_eui = cd["eui64"]
+                        if not auth_val and cd.get("auth_token"):
+                            auth_val = cd["auth_token"]
+                        if cd.get("name") == args.switch_name:
                             break
-            except Exception:
-                pass
+        except Exception as e:
+            if args.debug:
+                print(f"  (Cloud lookup error: {e})")
 
     if not pan_id_hex:
-        pan_id_hex = "3411"  # default fallback if not specified
+        pan_id_hex = "3411"
     if not admin_key_hex:
         admin_key_hex = "0000"
     if channel_val is None:
         channel_val = 26
-
-    auth_val = args.switch_token if args.switch_token else args.switch_code
     if not auth_val:
         print("ERROR: Either --switch-code or --switch-token is required.")
         sys.exit(1)
@@ -237,26 +293,34 @@ def main():
 
     buttons = BUTTONS if not args.skip_dim else BUTTONS[:2]
     end_index = args.start + args.count
+    first_write = True
 
     for idx in range(args.start, end_index):
-        if idx in existing_indices:
-            print(f"\n[{idx}/{end_index - 1}] Index {idx} already captured, skipping")
-            continue
-
         secret = secret_for_index(idx)
+        secret_hex = secret.hex().lower()
+
+        if secret_hex in existing_secrets:
+            print(f"\n[{idx}/{end_index - 1}] Shared secret {format_shared_secret(secret)} already in catalog, skipping")
+            continue
 
         print(f"\n{'='*60}")
         print(f"  [{idx}/{end_index - 1}] Capturing index {idx}")
-        print(f"  Secret: {secret.hex()}")
+        print(f"  Secret: {format_shared_secret(secret)} ({secret.hex()})")
         print(f"{'='*60}")
 
-        # Write secret to switch via BLE
+        # Write secret to switch via BLE (only configure radio params on first write)
         print(
             "\n  Press any button on the switch to wake BLE, then wait..."
         )
         ok = asyncio.run(
             write_shared_secret_ble(
-                args.switch_name, auth_val, secret, pan_id_hex, admin_key_hex, channel_val
+                args.switch_name,
+                auth_val,
+                secret,
+                pan_id_hex,
+                admin_key_hex,
+                channel_val,
+                write_radio_params=first_write,
             )
         )
         if not ok:
@@ -264,7 +328,13 @@ def main():
             time.sleep(5)
             ok = asyncio.run(
                 write_shared_secret_ble(
-                    args.switch_name, auth_val, secret, pan_id_hex, admin_key_hex, channel_val
+                    args.switch_name,
+                    auth_val,
+                    secret,
+                    pan_id_hex,
+                    admin_key_hex,
+                    channel_val,
+                    write_radio_params=first_write,
                 )
             )
             if not ok:
@@ -273,17 +343,20 @@ def main():
                 ser.close()
                 sys.exit(1)
 
+        first_write = False
+
         # Capture each button
+        target_pan_int = int(pan_id_hex, 16) if pan_id_hex else None
         entry = {
             "index": idx,
-            "shared_secret": secret.hex(),
+            "shared_secret": format_shared_secret(secret),
         }
         if switch_eui:
             entry["switch_eui"] = switch_eui.lower()
         all_captured = True
 
         for key, label in buttons:
-            result = capture_command(ser, label, timeout=45, debug=args.debug)
+            result = capture_command(ser, label, target_pan=target_pan_int, timeout=45, debug=args.debug)
             if result is None:
                 if key in ("dim_plus", "dim_minus"):
                     print(f"  Skipping {label} (not captured)")
@@ -294,15 +367,27 @@ def main():
                     break
 
             seq, tok = result
-            entry[f"{key}_sequence"] = seq
+            entry[f"{key}_sequence"] = HexInt(seq)
             entry[f"{key}_token"] = tok
 
         if not all_captured:
             print("  Incomplete capture. Try this index again with --start")
             continue
 
-        existing.append(entry)
-        existing_indices.add(idx)
+        # Clean ordering for keys: shared_secret, switch_eui, sequences & tokens
+        ordered_entry = {
+            "shared_secret": entry.get("shared_secret"),
+        }
+        if "switch_eui" in entry:
+            ordered_entry["switch_eui"] = entry["switch_eui"]
+        for k, _ in buttons:
+            if f"{k}_sequence" in entry:
+                ordered_entry[f"{k}_sequence"] = entry[f"{k}_sequence"]
+            if f"{k}_token" in entry:
+                ordered_entry[f"{k}_token"] = entry[f"{k}_token"]
+
+        existing.append(ordered_entry)
+        existing_secrets.add(secret_hex)
 
         # Save after each successful capture (crash-safe)
         save_catalog(args.output, existing)
