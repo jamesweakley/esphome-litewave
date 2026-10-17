@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <string>
 #include <vector>
+#include <memory>
 #include <functional>
 
 #include "esphome/core/log.h"
@@ -563,22 +564,31 @@ inline const char *describe_ltpdu_code(uint8_t code) {
 }
 
 // ---------------------------------------------------------------------------
-// UDP transport
+// Network Transports (UDP & TCP)
 // ---------------------------------------------------------------------------
 
-class UdpTransport {
+class Transport {
+ public:
+    virtual ~Transport() = default;
+    virtual bool open() = 0;
+    virtual int send_recv(const uint8_t *data, size_t len,
+                          uint8_t *resp_buf, size_t resp_max, int retries = 6) = 0;
+    virtual void close() = 0;
+};
+
+class UdpTransport : public Transport {
  public:
     UdpTransport(const std::string &host, uint16_t port, float timeout_s = 8.0f)
         : host_(host), port_(port), timeout_s_(timeout_s), sock_(-1) {}
 
-    ~UdpTransport() { close(); }
+    ~UdpTransport() override { close(); }
 
-    bool open() {
+    bool open() override {
         bool is_ipv6 = host_.find(':') != std::string::npos;
         int family = is_ipv6 ? AF_INET6 : AF_INET;
         sock_ = ::socket(family, SOCK_DGRAM, IPPROTO_UDP);
         if (sock_ < 0) {
-            ESP_LOGE(LTPDU_TAG, "socket() failed: %d", errno);
+            ESP_LOGE(LTPDU_TAG, "UDP socket() failed: %d", errno);
             return false;
         }
 
@@ -631,7 +641,7 @@ class UdpTransport {
     }
 
     int send_recv(const uint8_t *data, size_t len,
-                  uint8_t *resp_buf, size_t resp_max, int retries = 6) {
+                  uint8_t *resp_buf, size_t resp_max, int retries = 6) override {
         struct sockaddr *addr = is_ipv6_ ? (struct sockaddr *)&addr6_
                                          : (struct sockaddr *)&addr4_;
         socklen_t addr_len = is_ipv6_ ? sizeof(addr6_) : sizeof(addr4_);
@@ -653,7 +663,7 @@ class UdpTransport {
         return -1;
     }
 
-    void close() {
+    void close() override {
         if (sock_ >= 0) {
             ::close(sock_);
             sock_ = -1;
@@ -664,10 +674,150 @@ class UdpTransport {
     std::string host_;
     uint16_t port_;
     float timeout_s_;
-    int sock_;
+    int sock_{-1};
     bool is_ipv6_{false};
-    struct sockaddr_in addr4_;
-    struct sockaddr_in6 addr6_;
+    struct sockaddr_in addr4_{};
+    struct sockaddr_in6 addr6_{};
+};
+
+class TcpTransport : public Transport {
+ public:
+    TcpTransport(const std::string &host, uint16_t port, float timeout_s = 8.0f)
+        : host_(host), port_(port), timeout_s_(timeout_s), sock_(-1) {}
+
+    ~TcpTransport() override { close(); }
+
+    bool open() override {
+        bool is_ipv6 = host_.find(':') != std::string::npos;
+        int family = is_ipv6 ? AF_INET6 : AF_INET;
+        sock_ = ::socket(family, SOCK_STREAM, IPPROTO_TCP);
+        if (sock_ < 0) {
+            ESP_LOGE(LTPDU_TAG, "TCP socket() failed: %d", errno);
+            return false;
+        }
+
+        struct timeval tv;
+        tv.tv_sec = (int)timeout_s_;
+        tv.tv_usec = (int)((timeout_s_ - tv.tv_sec) * 1000000);
+        ::setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        ::setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        int nodelay = 1;
+        ::setsockopt(sock_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
+        if (is_ipv6) {
+            struct sockaddr_in6 addr6{};
+            addr6.sin6_family = AF_INET6;
+            addr6.sin6_port = htons(port_);
+            if (inet_pton(AF_INET6, host_.c_str(), &addr6.sin6_addr) <= 0) {
+                struct addrinfo hints{}, *res = nullptr;
+                hints.ai_family = AF_INET6;
+                hints.ai_socktype = SOCK_STREAM;
+                if (getaddrinfo(host_.c_str(), nullptr, &hints, &res) == 0 && res) {
+                    memcpy(&addr6, res->ai_addr, sizeof(addr6));
+                    addr6.sin6_port = htons(port_);
+                    freeaddrinfo(res);
+                } else {
+                    ESP_LOGE(LTPDU_TAG, "Failed to resolve IPv6 host '%s'", host_.c_str());
+                    close();
+                    return false;
+                }
+            }
+            if (::connect(sock_, (struct sockaddr *)&addr6, sizeof(addr6)) < 0) {
+                ESP_LOGE(LTPDU_TAG, "TCP connect() to [%s]:%d failed (errno=%d: %s)",
+                         host_.c_str(), port_, errno, strerror(errno));
+                close();
+                return false;
+            }
+        } else {
+            struct sockaddr_in addr4{};
+            addr4.sin_family = AF_INET;
+            addr4.sin_port = htons(port_);
+            if (inet_pton(AF_INET, host_.c_str(), &addr4.sin_addr) <= 0) {
+                struct hostent *he = gethostbyname(host_.c_str());
+                if (he && he->h_addr_list && he->h_addr_list[0]) {
+                    memcpy(&addr4.sin_addr, he->h_addr_list[0], sizeof(addr4.sin_addr));
+                } else {
+                    ESP_LOGE(LTPDU_TAG, "Failed to resolve IPv4 host '%s'", host_.c_str());
+                    close();
+                    return false;
+                }
+            }
+            if (::connect(sock_, (struct sockaddr *)&addr4, sizeof(addr4)) < 0) {
+                ESP_LOGE(LTPDU_TAG, "TCP connect() to %s:%d failed (errno=%d: %s)",
+                         host_.c_str(), port_, errno, strerror(errno));
+                close();
+                return false;
+            }
+        }
+        ESP_LOGI(LTPDU_TAG, "TCP connected successfully to %s:%d", host_.c_str(), port_);
+        return true;
+    }
+
+    int send_recv(const uint8_t *data, size_t len,
+                  uint8_t *resp_buf, size_t resp_max, int retries = 1) override {
+        size_t total_sent = 0;
+        while (total_sent < len) {
+            ssize_t sent = ::send(sock_, data + total_sent, len - total_sent, 0);
+            if (sent <= 0) {
+                ESP_LOGE(LTPDU_TAG, "TCP send() failed (errno=%d: %s)", errno, strerror(errno));
+                return -1;
+            }
+            total_sent += sent;
+        }
+        ESP_LOGD(LTPDU_TAG, "TCP sent %d bytes to %s:%d", (int)total_sent, host_.c_str(), port_);
+
+        // Read 12-byte LTPDU v3 header
+        size_t header_read = 0;
+        while (header_read < 12) {
+            ssize_t n = ::recv(sock_, resp_buf + header_read, 12 - header_read, 0);
+            if (n <= 0) {
+                ESP_LOGW(LTPDU_TAG, "TCP recv() header failed (n=%d, errno=%d: %s)",
+                         (int)n, errno, strerror(errno));
+                return -1;
+            }
+            header_read += n;
+        }
+
+        uint32_t payload_len = (static_cast<uint32_t>(resp_buf[8]) << 24) |
+                               (static_cast<uint32_t>(resp_buf[9]) << 16) |
+                               (static_cast<uint32_t>(resp_buf[10]) << 8) |
+                               static_cast<uint32_t>(resp_buf[11]);
+
+        size_t total_expected = 12 + payload_len;
+        if (total_expected > resp_max) {
+            ESP_LOGE(LTPDU_TAG, "Response frame size %u exceeds buffer %u",
+                     (unsigned)total_expected, (unsigned)resp_max);
+            return -1;
+        }
+
+        size_t payload_read = 0;
+        while (payload_read < payload_len) {
+            ssize_t n = ::recv(sock_, resp_buf + 12 + payload_read, payload_len - payload_read, 0);
+            if (n <= 0) {
+                ESP_LOGW(LTPDU_TAG, "TCP recv() payload failed (n=%d, errno=%d: %s)",
+                         (int)n, errno, strerror(errno));
+                return -1;
+            }
+            payload_read += n;
+        }
+
+        ESP_LOGI(LTPDU_TAG, "TCP received %d bytes from %s:%d", (int)total_expected, host_.c_str(), port_);
+        return (int)total_expected;
+    }
+
+    void close() override {
+        if (sock_ >= 0) {
+            ::close(sock_);
+            sock_ = -1;
+        }
+    }
+
+ private:
+    std::string host_;
+    uint16_t port_;
+    float timeout_s_;
+    int sock_{-1};
 };
 
 // ---------------------------------------------------------------------------
@@ -676,14 +826,19 @@ class UdpTransport {
 
 class LtpduV3Session {
  public:
-    LtpduV3Session(const std::string &host, uint16_t port = 12566)
-        : transport_(host, port) {
+    LtpduV3Session(const std::string &host, uint16_t port = 12566, bool use_tcp = false) {
+        if (use_tcp) {
+            transport_ = std::unique_ptr<Transport>(new TcpTransport(host, port));
+        } else {
+            transport_ = std::unique_ptr<Transport>(new UdpTransport(host, port));
+        }
         client_id_ = 0xFFFF;
         msg_counter_ = esp_random() & 0xFFFE;
         if (msg_counter_ == 0) msg_counter_ = 1;
     }
 
-    bool connect() { return transport_.open(); }
+    bool connect() { return transport_ ? transport_->open() : false; }
+    void close() { if (transport_) transport_->close(); }
 
     bool pair(const std::string &service_name, const std::string &pairing_code) {
         // Username = service name truncated at first hyphen
@@ -806,7 +961,7 @@ class LtpduV3Session {
             delete session_;
             session_ = nullptr;
         }
-        transport_.close();
+        if (transport_) transport_->close();
     }
 
     void disconnect() {
@@ -818,18 +973,19 @@ class LtpduV3Session {
             delete session_;
             session_ = nullptr;
         }
-        transport_.close();
+        if (transport_) transport_->close();
     }
 
  private:
     uint16_t next_msg_id() { return msg_counter_++; }
 
     std::vector<uint8_t> send_secure(const std::vector<uint8_t> &data) {
+        if (!transport_) return {};
         auto pkt = build_v3_request(next_msg_id(), client_id_, 1 /*Secure*/, 1 /*POST*/, data);
-        uint8_t resp_buf[4096];
-        int n = transport_.send_recv(pkt.data(), pkt.size(), resp_buf, sizeof(resp_buf));
+        std::vector<uint8_t> resp_buf(2048);
+        int n = transport_->send_recv(pkt.data(), pkt.size(), resp_buf.data(), resp_buf.size());
         if (n <= 0) return {};
-        auto resp = parse_v3_response(resp_buf, n);
+        auto resp = parse_v3_response(resp_buf.data(), n);
         if (!resp.valid) return {};
         if (resp.resp_code != 0) {
             ESP_LOGE(LTPDU_TAG, "Secure request rejected: code %d (%s)",
@@ -842,20 +998,20 @@ class LtpduV3Session {
 
     LtpduResponse send_ltpdu(const std::string &endpoint,
                              const uint8_t *value, size_t vlen, uint8_t method) {
-        if (!session_) return {"", -1, {}};
+        if (!session_ || !transport_) return {"", -1, {}};
         auto payload = build_ltpdu_cmd(endpoint, value, vlen, method);
         auto enc = session_->encrypt(payload);
         auto pkt = build_v3_request(next_msg_id(), client_id_, 2 /*LTPDU*/, 1 /*POST*/, enc);
-        uint8_t resp_buf[4096];
-        int n = transport_.send_recv(pkt.data(), pkt.size(), resp_buf, sizeof(resp_buf));
+        std::vector<uint8_t> resp_buf(2048);
+        int n = transport_->send_recv(pkt.data(), pkt.size(), resp_buf.data(), resp_buf.size());
         if (n <= 0) return {"", -1, {}};
-        auto resp = parse_v3_response(resp_buf, n);
+        auto resp = parse_v3_response(resp_buf.data(), n);
         if (!resp.valid || resp.data.empty()) return {"", -1, {}};
         auto dec = session_->decrypt(resp.data);
         return parse_ltpdu_response(dec.data(), dec.size());
     }
 
-    UdpTransport transport_;
+    std::unique_ptr<Transport> transport_;
     uint16_t client_id_;
     uint16_t msg_counter_;
     EncryptedSession *session_{nullptr};
@@ -875,12 +1031,87 @@ inline bool provision_light_sync(const std::string &host,
                                  uint8_t channel,
                                  uint16_t admin_key = 0,
                                  const uint8_t *acl_payload = nullptr,
-                                 size_t acl_len = 0) {
-    LtpduV3Session session(host, port);
+                                 size_t acl_len = 0,
+                                 bool use_tcp = false) {
+    ESP_LOGI(LTPDU_TAG, "Opening %s session to %s:%d...", use_tcp ? "TCP" : "UDP", host.c_str(), port);
+    LtpduV3Session session(host, port, use_tcp);
     if (!session.connect()) {
-        ESP_LOGE(LTPDU_TAG, "UDP connect failed to %s", host.c_str());
+        ESP_LOGE(LTPDU_TAG, "%s connect failed to %s:%d", use_tcp ? "TCP" : "UDP", host.c_str(), port);
         return false;
     }
+
+    // Use host as service name hint if nothing better
+    std::string svc = service_name_hint.empty() ? host : service_name_hint;
+
+    if (!session.pair(svc, pairing_code)) {
+        ESP_LOGE(LTPDU_TAG, "SRP pairing failed");
+        session.disconnect();
+        return false;
+    }
+
+    // 1. Admin Key (if configured)
+    if (admin_key != 0) {
+        uint8_t admin_buf[2] = {static_cast<uint8_t>((admin_key >> 8) & 0xFF),
+                                static_cast<uint8_t>(admin_key & 0xFF)};
+        session.post("sp/admin", admin_buf, sizeof(admin_buf));
+    }
+
+    // 2. PAN ID
+    uint8_t pan_buf[2] = {static_cast<uint8_t>((pan_id >> 8) & 0xFF),
+                          static_cast<uint8_t>(pan_id & 0xFF)};
+    session.post("sp/pi", pan_buf, sizeof(pan_buf));
+
+    // 3. Channel
+    session.post("sp/mc", &channel, 1);
+
+    // 4. Shared Secret
+    ESP_LOGI(LTPDU_TAG, "Writing sp/ss (%d bytes)...", ss_len);
+    auto wr = session.post("sp/ss", shared_secret, ss_len);
+    if (wr.status != 0 && wr.status != -1) {
+        ESP_LOGW(LTPDU_TAG, "sp/ss write status: %d", wr.status);
+    }
+
+    // Verify readback
+    auto rd = session.get("sp/ss");
+    if (rd.status == 0 && rd.value.size() == ss_len &&
+        memcmp(rd.value.data(), shared_secret, ss_len) == 0) {
+        ESP_LOGI(LTPDU_TAG, "sp/ss verified!");
+    } else {
+        ESP_LOGW(LTPDU_TAG, "sp/ss readback mismatch (status=%d, len=%d)",
+                 rd.status, rd.value.size());
+    }
+
+    // 5. Switch Access Control List (ACL)
+    if (acl_payload && acl_len > 0) {
+        ESP_LOGI(LTPDU_TAG, "Writing lb/0/sp/llc/acl (%d bytes)...", acl_len);
+        auto wr_acl = session.put("lb/0/sp/llc/acl", acl_payload, acl_len);
+        if (wr_acl.status != 0 && wr_acl.status != -1) {
+            wr_acl = session.put("sp/llc/acl", acl_payload, acl_len);
+        }
+        if (wr_acl.status == 0 || wr_acl.status == -1) {
+            ESP_LOGI(LTPDU_TAG, "ACL write succeeded");
+        } else {
+            ESP_LOGW(LTPDU_TAG, "ACL write status: %d", wr_acl.status);
+        }
+
+        // Verify ACL readback
+        auto rd_acl = session.get("lb/0/sp/llc/acl");
+        if (rd_acl.status != 0) {
+            rd_acl = session.get("sp/llc/acl");
+        }
+        if (rd_acl.status == 0 && rd_acl.value.size() == acl_len &&
+            memcmp(rd_acl.value.data(), acl_payload, acl_len) == 0) {
+            ESP_LOGI(LTPDU_TAG, "ACL verified!");
+        } else if (rd_acl.status == 0) {
+            ESP_LOGI(LTPDU_TAG, "ACL readback received (%d bytes)", rd_acl.value.size());
+        }
+    }
+
+    // Clean up temporary pairing slot so it does not count towards the 5-slot ceiling
+    session.unpair();
+    ESP_LOGI(LTPDU_TAG, "Provision complete for %s", host.c_str());
+    return true;
+}
 
     // Use host as service name hint if nothing better
     std::string svc = service_name_hint.empty() ? host : service_name_hint;

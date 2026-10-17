@@ -187,7 +187,7 @@ void LitewaveComponent::provision_light(const std::string &light_id, const std::
     BaseType_t res = xTaskCreate(
         provision_task_trampoline,
         "ltpdu_prov",
-        8192,
+        12288,
         ctx,
         tskIDLE_PRIORITY + 1,
         nullptr
@@ -200,8 +200,11 @@ void LitewaveComponent::provision_light(const std::string &light_id, const std::
 
 struct DiscoveredLight {
     std::string ip;
+    std::string ipv4;
+    std::string ipv6;
     uint16_t port{12566};
     std::string instance_name;
+    bool is_tcp{false};
 };
 
 static bool query_and_match_mdns(const char *service_type, const char *proto,
@@ -273,18 +276,21 @@ static bool query_and_match_mdns(const char *service_type, const char *proto,
                         if (a->addr.type == ESP_IPADDR_TYPE_V6) {
                             inet_ntop(AF_INET6, &(a->addr.u_addr.ip6), ip_buf, sizeof(ip_buf));
                             ESP_LOGI(TAG, "  -> Address[%d]: %s (IPv6)", ip_count++, ip_buf);
+                            if (out.ipv6.empty()) out.ipv6 = ip_buf;
                             if (out.ip.empty()) out.ip = ip_buf;
                         } else if (a->addr.type == ESP_IPADDR_TYPE_V4) {
                             inet_ntop(AF_INET, &(a->addr.u_addr.ip4), ip_buf, sizeof(ip_buf));
                             ESP_LOGI(TAG, "  -> Address[%d]: %s (IPv4)", ip_count++, ip_buf);
+                            if (out.ipv4.empty()) out.ipv4 = ip_buf;
                             if (out.ip.empty()) out.ip = ip_buf;
                         }
                         a = a->next;
                     }
-                    if (!out.ip.empty()) {
+                    if (!out.ip.empty() || !out.ipv4.empty() || !out.ipv6.empty()) {
                         out.port = r->port != 0 ? r->port : 12566;
                         out.instance_name = inst;
-                        ESP_LOGI(TAG, "  -> Matched target '%s': Using IP=%s:%d", target_id.c_str(), out.ip.c_str(), out.port);
+                        out.is_tcp = (strcmp(proto, "_tcp") == 0);
+                        ESP_LOGI(TAG, "  -> Matched target '%s': Using proto=%s, port=%d", target_id.c_str(), proto, out.port);
                         for (size_t t = 0; t < r->txt_count; t++) {
                             std::string key = r->txt[t].key ? r->txt[t].key : "";
                             std::string val = r->txt[t].value ? r->txt[t].value : "";
@@ -392,26 +398,38 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
     std::string srp_service_name = !target_light->id.empty() ? ("Nanoleaf DL " + target_light->id) : light_name;
     std::string target_host = target_light->host;
     uint16_t target_port = 12566;
+    bool use_tcp = false;
 
     if (target_host.empty()) {
-        ESP_LOGI(TAG, "Resolving light '%s' via mDNS (_ltpdu._udp)...", light_id.c_str());
+        ESP_LOGI(TAG, "Resolving light '%s' via mDNS (_ltpdu._udp / _ltpdu._tcp)...", light_id.c_str());
         DiscoveredLight disc;
         std::string lookup_id = !target_light->id.empty() ? target_light->id : light_id;
         if (resolve_light_mdns(lookup_id, disc)) {
-            target_host = disc.ip;
+            // Prefer IPv4 on Wi-Fi LAN when available (especially for TCP services)
+            if (disc.is_tcp && !disc.ipv4.empty()) {
+                target_host = disc.ipv4;
+            } else if (!disc.ipv4.empty()) {
+                target_host = disc.ipv4;
+            } else if (!disc.ipv6.empty()) {
+                target_host = disc.ipv6;
+            } else {
+                target_host = disc.ip;
+            }
             target_port = disc.port;
+            use_tcp = disc.is_tcp;
             if (!disc.instance_name.empty()) {
                 srp_service_name = disc.instance_name;
             }
-            ESP_LOGI(TAG, "mDNS resolved light '%s' to %s:%d (service '%s')",
-                     lookup_id.c_str(), target_host.c_str(), target_port, srp_service_name.c_str());
+            ESP_LOGI(TAG, "mDNS resolved light '%s' to %s:%d (proto: %s, service '%s')",
+                     lookup_id.c_str(), target_host.c_str(), target_port, use_tcp ? "TCP" : "UDP", srp_service_name.c_str());
         } else {
             ESP_LOGE(TAG, "Could not resolve light '%s' via mDNS and no 'host' specified in YAML", light_id.c_str());
             return;
         }
     }
 
-    ESP_LOGI(TAG, "Provisioning light '%s' (%s) at %s:%d", light_name.c_str(), srp_service_name.c_str(), target_host.c_str(), target_port);
+    ESP_LOGI(TAG, "Provisioning light '%s' (%s) at %s:%d via %s",
+             light_name.c_str(), srp_service_name.c_str(), target_host.c_str(), target_port, use_tcp ? "TCP" : "UDP");
 
     bool ok = provision_light_sync(
         target_host,
@@ -424,7 +442,8 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
         channel_,
         admin_key_,
         target_group->get_acl_payload(),
-        target_group->get_acl_len()
+        target_group->get_acl_len(),
+        use_tcp
     );
     if (ok) {
         ESP_LOGI(TAG, "Provisioning succeeded for '%s'", light_name.c_str());
