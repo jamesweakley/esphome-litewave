@@ -767,17 +767,25 @@ class TcpTransport : public Transport {
         }
         ESP_LOGD(LTPDU_TAG, "TCP sent %d bytes to %s:%d", (int)total_sent, host_.c_str(), port_);
 
-        // Read 12-byte LTPDU v3 header
-        size_t header_read = 0;
-        while (header_read < 12) {
-            ssize_t n = ::recv(sock_, resp_buf + header_read, 12 - header_read, 0);
-            if (n <= 0) {
-                ESP_LOGW(LTPDU_TAG, "TCP recv() header failed (n=%d, errno=%d: %s)",
-                         (int)n, errno, strerror(errno));
-                return -1;
-            }
-            header_read += n;
+        // Read initial bytes
+        uint8_t temp_buf[256];
+        ssize_t n = ::recv(sock_, temp_buf, sizeof(temp_buf) - 1, 0);
+        if (n <= 0) {
+            ESP_LOGW(LTPDU_TAG, "TCP recv() failed (n=%d, errno=%d: %s)", (int)n, errno, strerror(errno));
+            return -1;
         }
+        temp_buf[n] = '\0';
+        ESP_LOGI(LTPDU_TAG, "TCP received %d raw bytes: \"%s\"", (int)n, (char *)temp_buf);
+        char hex_dump[128];
+        int hex_len = n > 32 ? 32 : n;
+        for (int i = 0; i < hex_len; i++) sprintf(&hex_dump[i * 2], "%02X", temp_buf[i]);
+        ESP_LOGI(LTPDU_TAG, "TCP raw hex: %s", hex_dump);
+
+        if (n < 12) {
+            ESP_LOGW(LTPDU_TAG, "TCP response too short (%d bytes)", (int)n);
+            return -1;
+        }
+        memcpy(resp_buf, temp_buf, n);
 
         uint32_t payload_len = (static_cast<uint32_t>(resp_buf[8]) << 24) |
                                (static_cast<uint32_t>(resp_buf[9]) << 16) |
@@ -791,15 +799,15 @@ class TcpTransport : public Transport {
             return -1;
         }
 
-        size_t payload_read = 0;
+        size_t payload_read = n - 12;
         while (payload_read < payload_len) {
-            ssize_t n = ::recv(sock_, resp_buf + 12 + payload_read, payload_len - payload_read, 0);
-            if (n <= 0) {
-                ESP_LOGW(LTPDU_TAG, "TCP recv() payload failed (n=%d, errno=%d: %s)",
-                         (int)n, errno, strerror(errno));
+            ssize_t extra = ::recv(sock_, resp_buf + 12 + payload_read, payload_len - payload_read, 0);
+            if (extra <= 0) {
+                ESP_LOGW(LTPDU_TAG, "TCP recv() extra payload failed (n=%d, errno=%d: %s)",
+                         (int)extra, errno, strerror(errno));
                 return -1;
             }
-            payload_read += n;
+            payload_read += extra;
         }
 
         ESP_LOGI(LTPDU_TAG, "TCP received %d bytes from %s:%d", (int)total_expected, host_.c_str(), port_);

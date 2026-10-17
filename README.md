@@ -233,6 +233,74 @@ button:
 
 ---
 
+## Alternative Component: `nanoleaf_wifi` (Wi-Fi Essentials & OpenAPI)
+
+For **Matter-over-Wi-Fi** Nanoleaf devices that do not have an 802.15.4 / Thread radio (such as the **Nanoleaf Essentials WiFi A19 model `NL75K1`**, Holiday String Lights, and Wi-Fi Lightstrips), use the `nanoleaf_wifi` external component.
+
+It provides direct local control from the ESP32 over your local Wi-Fi network without Home Assistant using:
+1. **Local OpenAPI REST Client**: Discovers and pairs with devices by DNS/mDNS hostname (e.g. `nanoleaf-a19-3dc.local`).
+2. **`extControl` UDP Streaming**: Streams unauthenticated binary RGB frames directly to UDP port `60222` with sub-10ms response time.
+
+### `nanoleaf_wifi` YAML Configuration
+
+```yaml
+external_components:
+  - source: github://jamesweakley/esphome-litewave
+    components: [nanoleaf_wifi]
+
+nanoleaf_wifi:
+  lights:
+    - id: bedroom_bulb
+      host: "nanoleaf-a19-3dc.local"   # DNS / mDNS hostname
+      port: 12566                     # OpenAPI HTTP port (default: 12566)
+      udp_port: 60222                 # extControl UDP port (default: 60222)
+      # auth_token: "optional_token"  # If omitted, provision_light will fetch one
+
+button:
+  # One-time pairing / extControl activation:
+  - platform: template
+    name: "Provision Bedroom Bulb"
+    on_press:
+      - nanoleaf_wifi.provision_light:
+          light_id: bedroom_bulb
+
+  # Direct, instant UDP control:
+  - platform: template
+    name: "Bedroom Bulb ON"
+    on_press:
+      - nanoleaf_wifi.send_on:
+          light_id: bedroom_bulb
+          red: 255
+          green: 255
+          blue: 255
+          transition_ms: 100
+
+  - platform: template
+    name: "Bedroom Bulb OFF"
+    on_press:
+      - nanoleaf_wifi.send_off:
+          light_id: bedroom_bulb
+          transition_ms: 100
+
+  - platform: template
+    name: "Bedroom Bulb Warm White"
+    on_press:
+      - nanoleaf_wifi.set_color:
+          light_id: bedroom_bulb
+          red: 255
+          green: 147
+          blue: 41
+          transition_ms: 200
+```
+
+### `nanoleaf_wifi` Setup Flow:
+1. Open the **Nanoleaf App**, navigate to the bulb's device settings, and tap **Connect to API** (opens a 30s pairing window).
+2. Trigger the `nanoleaf_wifi.provision_light` action (via button or Home Assistant action call).
+3. The ESP32 resolves the hostname, fetches the permanent `auth_token`, activates `extControl` mode, and logs the token.
+4. All subsequent `send_on`, `send_off`, and `set_color` actions stream raw binary frames over UDP port 60222 peer-to-peer with zero latency.
+
+---
+
 ## Tools Inventory
 
 | Script | Purpose |

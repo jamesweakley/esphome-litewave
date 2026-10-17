@@ -405,7 +405,7 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
         DiscoveredLight disc;
         std::string lookup_id = !target_light->id.empty() ? target_light->id : light_id;
         if (resolve_light_mdns(lookup_id, disc)) {
-            // Prefer IPv4 on Wi-Fi LAN for direct UDP reachability from ESP32
+            // Prefer IPv4 on Wi-Fi LAN for direct reachability from ESP32
             if (!disc.ipv4.empty()) {
                 target_host = disc.ipv4;
             } else if (!disc.ipv6.empty()) {
@@ -414,7 +414,7 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
                 target_host = disc.ip;
             }
             target_port = disc.port;
-            use_tcp = false; // LTPDU v3 binary protocol is UDP
+            use_tcp = disc.is_tcp;
             if (!disc.instance_name.empty()) {
                 srp_service_name = disc.instance_name;
             }
