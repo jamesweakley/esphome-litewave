@@ -331,13 +331,19 @@ static bool resolve_light_mdns(const std::string &target_id, DiscoveredLight &ou
         return true;
     }
 
-    // 2. Fallback: try _nanoleafms._udp
+    // 2. Fallback: try _ltpdu._tcp (some firmware builds advertise as _tcp)
+    ESP_LOGI(TAG, "Checking fallback service _ltpdu._tcp (10s timeout)...");
+    if (query_and_match_mdns("_ltpdu", "_tcp", 10000, target_id, out)) {
+        return true;
+    }
+
+    // 3. Fallback: try _nanoleafms._udp
     ESP_LOGI(TAG, "Checking fallback service _nanoleafms._udp (5s timeout)...");
     if (query_and_match_mdns("_nanoleafms", "_udp", 5000, target_id, out)) {
         return true;
     }
 
-    // 3. Fallback: try _nanoleafapi._tcp
+    // 4. Fallback: try _nanoleafapi._tcp
     ESP_LOGI(TAG, "Checking fallback service _nanoleafapi._tcp (5s timeout)...");
     if (query_and_match_mdns("_nanoleafapi", "_tcp", 5000, target_id, out)) {
         return true;
