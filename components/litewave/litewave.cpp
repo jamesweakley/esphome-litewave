@@ -405,10 +405,8 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
         DiscoveredLight disc;
         std::string lookup_id = !target_light->id.empty() ? target_light->id : light_id;
         if (resolve_light_mdns(lookup_id, disc)) {
-            // Prefer IPv4 on Wi-Fi LAN when available (especially for TCP services)
-            if (disc.is_tcp && !disc.ipv4.empty()) {
-                target_host = disc.ipv4;
-            } else if (!disc.ipv4.empty()) {
+            // Prefer IPv4 on Wi-Fi LAN for direct UDP reachability from ESP32
+            if (!disc.ipv4.empty()) {
                 target_host = disc.ipv4;
             } else if (!disc.ipv6.empty()) {
                 target_host = disc.ipv6;
@@ -416,7 +414,7 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
                 target_host = disc.ip;
             }
             target_port = disc.port;
-            use_tcp = disc.is_tcp;
+            use_tcp = false; // LTPDU v3 binary protocol is UDP
             if (!disc.instance_name.empty()) {
                 srp_service_name = disc.instance_name;
             }
@@ -445,6 +443,34 @@ void LitewaveComponent::run_provision_task(const std::string &light_id, const st
         target_group->get_acl_len(),
         use_tcp
     );
+
+    // If UDP to IPv4 failed and we have an alternate IPv6 address, try IPv6
+    if (!ok && !target_light->host.empty() && target_host != target_light->host) {
+        // user provided host already tried
+    } else if (!ok) {
+        DiscoveredLight disc_retry;
+        std::string lookup_id = !target_light->id.empty() ? target_light->id : light_id;
+        if (resolve_light_mdns(lookup_id, disc_retry)) {
+            if (!disc_retry.ipv6.empty() && target_host != disc_retry.ipv6) {
+                ESP_LOGI(TAG, "Retrying provisioning over IPv6: %s:%d", disc_retry.ipv6.c_str(), disc_retry.port);
+                ok = provision_light_sync(
+                    disc_retry.ipv6,
+                    disc_retry.port,
+                    pairing_code,
+                    srp_service_name,
+                    target_group->get_shared_secret(),
+                    target_group->get_shared_secret_len(),
+                    pan_id_,
+                    channel_,
+                    admin_key_,
+                    target_group->get_acl_payload(),
+                    target_group->get_acl_len(),
+                    false
+                );
+            }
+        }
+    }
+
     if (ok) {
         ESP_LOGI(TAG, "Provisioning succeeded for '%s'", light_name.c_str());
     } else {
