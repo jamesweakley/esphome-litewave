@@ -6,11 +6,7 @@ namespace nanoleaf_wifi {
 static const char *const TAG = "nanoleaf_wifi";
 
 void NanoleafWifiComponent::setup() {
-    ESP_LOGCONFIG(TAG, "Setting up Nanoleaf WiFi component...");
-    udp_sock_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udp_sock_ < 0) {
-        ESP_LOGE(TAG, "Failed to create UDP socket: errno %d", errno);
-    }
+    ESP_LOGCONFIG(TAG, "Nanoleaf WiFi component initialized.");
 }
 
 void NanoleafWifiComponent::dump_config() {

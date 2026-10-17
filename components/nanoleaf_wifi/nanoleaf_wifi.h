@@ -27,6 +27,7 @@ struct NanoleafWifiLight {
 
 class NanoleafWifiComponent : public Component {
  public:
+    float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
     void setup() override;
     void dump_config() override;
 

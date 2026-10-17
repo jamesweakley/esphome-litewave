@@ -4,7 +4,7 @@ from esphome import automation
 from esphome.const import CONF_ID
 
 CODEOWNERS = ["@jamesweakley"]
-DEPENDENCIES = ["network"]
+DEPENDENCIES = ["wifi"]
 
 CONF_LIGHTS = "lights"
 CONF_HOST = "host"
