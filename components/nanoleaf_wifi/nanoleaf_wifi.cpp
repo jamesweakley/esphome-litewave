@@ -53,6 +53,62 @@ NanoleafWifiLight *NanoleafWifiComponent::find_light(const std::string &light_id
     return nullptr;
 }
 
+static bool query_and_match_service(const char *service, const char *proto, const std::string &target_id, std::string &out_ip, uint16_t &out_port) {
+    std::string target_upper = target_id;
+    for (auto &c : target_upper) c = toupper((unsigned char)c);
+    if (target_upper.find(".LOCAL") != std::string::npos) {
+        target_upper = target_upper.substr(0, target_upper.find(".LOCAL"));
+    }
+
+    mdns_result_t *results = nullptr;
+    esp_err_t err = mdns_query_ptr(service, proto, 2000, 20, &results);
+    if (err == ESP_OK && results) {
+        mdns_result_t *r = results;
+        while (r) {
+            std::string inst = r->instance_name ? r->instance_name : "";
+            std::string inst_upper = inst;
+            for (auto &c : inst_upper) c = toupper((unsigned char)c);
+
+            bool match = false;
+            if (inst_upper == target_upper ||
+                inst_upper.find(target_upper) != std::string::npos ||
+                target_upper.find(inst_upper) != std::string::npos) {
+                match = true;
+            }
+
+            for (size_t t = 0; t < r->txt_count && !match; t++) {
+                std::string key = r->txt[t].key ? r->txt[t].key : "";
+                std::string val = r->txt[t].value ? r->txt[t].value : "";
+                std::string val_upper = val;
+                for (auto &c : val_upper) c = toupper((unsigned char)c);
+                if ((key == "id" || key == "eui64" || key == "eui") &&
+                    (val_upper == target_upper || val_upper.find(target_upper) != std::string::npos)) {
+                    match = true;
+                    break;
+                }
+            }
+
+            if (match) {
+                mdns_ip_addr_t *a = r->addr;
+                while (a) {
+                    char ip_buf[INET_ADDRSTRLEN];
+                    if (a->addr.type == ESP_IPADDR_TYPE_V4) {
+                        inet_ntop(AF_INET, &(a->addr.u_addr.ip4), ip_buf, sizeof(ip_buf));
+                        out_ip = ip_buf;
+                        if (r->port != 0) out_port = r->port;
+                        mdns_query_results_free(results);
+                        return true;
+                    }
+                    a = a->next;
+                }
+            }
+            r = r->next;
+        }
+        mdns_query_results_free(results);
+    }
+    return false;
+}
+
 bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
     if (!light.resolved_ip.empty()) {
         return true;
@@ -65,13 +121,28 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
         return true;
     }
 
-    // 2. mDNS check for .local hostnames (multicast DNS query with short timeout)
+    // 2. Initialize mDNS
+    esp_err_t m_err = mdns_init();
+    if (m_err != ESP_OK && m_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "mdns_init: %d", m_err);
+    }
+
+    // 3. Query mDNS services (_nanoleafapi._tcp and _ltpdu._tcp)
+    std::string ip_found;
+    uint16_t port_found = light.port;
+    if (query_and_match_service("_nanoleafapi", "_tcp", light.host, ip_found, port_found) ||
+        query_and_match_service("_ltpdu", "_tcp", light.host, ip_found, port_found) ||
+        query_and_match_service("_nanoleafapi", "_tcp", light.id, ip_found, port_found) ||
+        query_and_match_service("_ltpdu", "_tcp", light.id, ip_found, port_found)) {
+        light.resolved_ip = ip_found;
+        light.port = port_found;
+        ESP_LOGI(TAG, "mDNS resolved '%s' -> %s:%d", light.host.c_str(), light.resolved_ip.c_str(), light.port);
+        return true;
+    }
+
+    // 4. mDNS A-record query for .local hostname
     auto dot_local = light.host.find(".local");
     if (dot_local != std::string::npos) {
-        esp_err_t m_err = mdns_init();
-        if (m_err != ESP_OK && m_err != ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "mdns_init: %d", m_err);
-        }
         std::string hostname = light.host.substr(0, dot_local);
         esp_ip4_addr_t addr;
         addr.addr = 0;
@@ -80,14 +151,14 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
             char ip_buf[INET_ADDRSTRLEN];
             esp_ip4addr_ntoa(&addr, ip_buf, sizeof(ip_buf));
             light.resolved_ip = ip_buf;
-            ESP_LOGI(TAG, "mDNS resolved '%s' -> %s", light.host.c_str(), light.resolved_ip.c_str());
+            ESP_LOGI(TAG, "mDNS A-record resolved '%s' -> %s", light.host.c_str(), light.resolved_ip.c_str());
             return true;
         }
-        ESP_LOGW(TAG, "mDNS query for '%s' returned error %d", light.host.c_str(), err);
-        return false; // Do not fall through to unicast DNS for .local domains to avoid 5s timeout
+        ESP_LOGW(TAG, "Could not resolve mDNS device '%s'", light.host.c_str());
+        return false;
     }
 
-    // 3. Fallback: unicast standard DNS query for standard domain names
+    // 5. Fallback: unicast standard DNS query for standard domain names
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
