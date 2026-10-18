@@ -1,5 +1,6 @@
 #include "nanoleaf_wifi.h"
 #include "esphome/components/network/util.h"
+#include "mdns.h"
 
 namespace esphome {
 namespace nanoleaf_wifi {
@@ -57,13 +58,30 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
         return true;
     }
 
-    // Fast check: if host is already an IPv4 literal, avoid DNS query
+    // 1. Fast check: if host is already an IPv4 literal, avoid all queries
     struct in_addr dummy;
     if (inet_pton(AF_INET, light.host.c_str(), &dummy) == 1) {
         light.resolved_ip = light.host;
         return true;
     }
 
+    // 2. mDNS check for .local hostnames (fast multicast DNS query with 500ms timeout)
+    auto dot_local = light.host.find(".local");
+    if (dot_local != std::string::npos) {
+        std::string hostname = light.host.substr(0, dot_local);
+        esp_ip4_addr_t addr;
+        addr.addr = 0;
+        esp_err_t err = mdns_query_a(hostname.c_str(), 500, &addr);
+        if (err == ESP_OK && addr.addr != 0) {
+            char ip_buf[INET_ADDRSTRLEN];
+            esp_ip4addr_ntoa(&addr, ip_buf, sizeof(ip_buf));
+            light.resolved_ip = ip_buf;
+            ESP_LOGI(TAG, "mDNS resolved '%s' -> %s", light.host.c_str(), light.resolved_ip.c_str());
+            return true;
+        }
+    }
+
+    // 3. Fallback: unicast standard DNS query
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
@@ -75,11 +93,11 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
         inet_ntop(AF_INET, &(ipv4->sin_addr), ip_str, sizeof(ip_str));
         light.resolved_ip = ip_str;
         freeaddrinfo(res);
-        ESP_LOGI(TAG, "Resolved '%s' -> %s", light.host.c_str(), light.resolved_ip.c_str());
+        ESP_LOGI(TAG, "DNS resolved '%s' -> %s", light.host.c_str(), light.resolved_ip.c_str());
         return true;
     }
 
-    ESP_LOGW(TAG, "Failed to resolve DNS hostname '%s' (err=%d)", light.host.c_str(), err);
+    ESP_LOGW(TAG, "Failed to resolve hostname '%s'", light.host.c_str());
     return false;
 }
 

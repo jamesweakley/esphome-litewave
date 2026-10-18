@@ -1,6 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
+from esphome.components import esp32
 from esphome.const import CONF_ID
 
 CODEOWNERS = ["@jamesweakley"]
@@ -177,6 +178,7 @@ async def nanoleaf_set_color_to_code(config, action_id, template_arg, args):
 
 
 async def to_code(config):
+    esp32.include_builtin_idf_component("mdns")
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
