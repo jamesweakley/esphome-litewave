@@ -39,12 +39,16 @@ LIGHT_SCHEMA = cv.Schema(
     }
 )
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(NanoleafWifiComponent),
-        cv.Required(CONF_LIGHTS): cv.ensure_list(LIGHT_SCHEMA),
-    }
-).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = cv.All(
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(NanoleafWifiComponent),
+            cv.Required(CONF_LIGHTS): cv.ensure_list(LIGHT_SCHEMA),
+        }
+    ),
+    cv.only_on_esp32,
+    cv.only_with_framework(cv.Framework.ESP_IDF),
+)
 
 PROVISION_ACTION_SCHEMA = cv.Schema(
     {
