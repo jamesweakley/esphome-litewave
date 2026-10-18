@@ -23,6 +23,7 @@ NanoleafWifiComponent = nanoleaf_wifi_ns.class_("NanoleafWifiComponent", cg.Comp
 NanoleafWifiLight = nanoleaf_wifi_ns.struct("NanoleafWifiLight")
 
 NanoleafProvisionAction = nanoleaf_wifi_ns.class_("NanoleafProvisionAction", automation.Action)
+NanoleafEnableExtControlAction = nanoleaf_wifi_ns.class_("NanoleafEnableExtControlAction", automation.Action)
 NanoleafSendOnAction = nanoleaf_wifi_ns.class_("NanoleafSendOnAction", automation.Action)
 NanoleafSendOffAction = nanoleaf_wifi_ns.class_("NanoleafSendOffAction", automation.Action)
 NanoleafSetColorAction = nanoleaf_wifi_ns.class_("NanoleafSetColorAction", automation.Action)
@@ -45,6 +46,14 @@ CONFIG_SCHEMA = cv.Schema(
 ).extend(cv.COMPONENT_SCHEMA)
 
 PROVISION_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(NanoleafWifiComponent),
+        cv.Required(CONF_LIGHT_ID): cv.templatable(cv.string_strict),
+        cv.Optional(CONF_AUTH_TOKEN): cv.templatable(cv.string_strict),
+    }
+)
+
+ENABLE_EXTCONTROL_ACTION_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.use_id(NanoleafWifiComponent),
         cv.Required(CONF_LIGHT_ID): cv.templatable(cv.string_strict),
@@ -91,6 +100,22 @@ SET_COLOR_ACTION_SCHEMA = cv.Schema(
     PROVISION_ACTION_SCHEMA,
 )
 async def nanoleaf_provision_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    template_id = await cg.templatable(config[CONF_LIGHT_ID], args, cg.std_string)
+    cg.add(var.set_light_id(template_id))
+    if CONF_AUTH_TOKEN in config:
+        template_token = await cg.templatable(config[CONF_AUTH_TOKEN], args, cg.std_string)
+        cg.add(var.set_auth_token(template_token))
+    return var
+
+
+@automation.register_action(
+    "nanoleaf_wifi.enable_extcontrol",
+    NanoleafEnableExtControlAction,
+    ENABLE_EXTCONTROL_ACTION_SCHEMA,
+)
+async def nanoleaf_enable_extcontrol_to_code(config, action_id, template_arg, args):
     parent = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, parent)
     template_id = await cg.templatable(config[CONF_LIGHT_ID], args, cg.std_string)

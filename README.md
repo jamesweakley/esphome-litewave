@@ -254,10 +254,17 @@ nanoleaf_wifi:
       host: "nanoleaf-a19-3dc.local"   # DNS / mDNS hostname
       port: 12566                     # OpenAPI HTTP port (default: 12566)
       udp_port: 60222                 # extControl UDP port (default: 60222)
-      # auth_token: "optional_token"  # If omitted, provision_light will fetch one
+      auth_token: "qs1G6uIl9MqGnyzQM9P9bBRVHiZq79wx"  # Saved auth token
 
 button:
-  # One-time pairing / extControl activation:
+  # Activate / re-arm extControl mode (when auth_token is already known):
+  - platform: template
+    name: "Enable extControl Bedroom Bulb"
+    on_press:
+      - nanoleaf_wifi.enable_extcontrol:
+          light_id: bedroom_bulb
+
+  # One-time pairing / token acquisition (when pairing without token):
   - platform: template
     name: "Provision Bedroom Bulb"
     on_press:
@@ -293,11 +300,10 @@ button:
           transition_ms: 200
 ```
 
-### `nanoleaf_wifi` Setup Flow:
-1. Open the **Nanoleaf App**, navigate to the bulb's device settings, and tap **Connect to API** (opens a 30s pairing window).
-2. Trigger the `nanoleaf_wifi.provision_light` action (via button or Home Assistant action call).
-3. The ESP32 resolves the hostname, fetches the permanent `auth_token`, activates `extControl` mode, and logs the token.
-4. All subsequent `send_on`, `send_off`, and `set_color` actions stream raw binary frames over UDP port 60222 peer-to-peer with zero latency.
+### `nanoleaf_wifi` Setup & Usage Flow:
+1. **Initial Pairing (if token is not known):** Tap **Connect to API** in the Nanoleaf App settings, then trigger `nanoleaf_wifi.provision_light` to fetch and log the permanent `auth_token`.
+2. **Re-enabling extControl:** If your `auth_token` is already in YAML, simply call `nanoleaf_wifi.enable_extcontrol: light_id: bedroom_bulb` (or run it on boot) to ensure the bulb is powered on and streaming mode is active.
+3. **Instant Control:** Once in `extControl` mode, all `send_on`, `send_off`, and `set_color` actions stream raw binary frames over UDP port 60222 peer-to-peer with zero latency.
 
 ---
 

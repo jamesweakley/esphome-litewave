@@ -24,6 +24,23 @@ class NanoleafProvisionAction : public Action<Ts...> {
 };
 
 template<typename... Ts>
+class NanoleafEnableExtControlAction : public Action<Ts...> {
+ public:
+    NanoleafEnableExtControlAction(NanoleafWifiComponent *parent) : parent_(parent) {}
+    TEMPLATABLE_VALUE(std::string, light_id)
+    TEMPLATABLE_VALUE(std::string, auth_token)
+
+    void play(const Ts &...x) override {
+        std::string id = this->light_id_.value(x...);
+        std::string token = this->auth_token_.value(x...);
+        this->parent_->enable_extcontrol(id, token);
+    }
+
+ protected:
+    NanoleafWifiComponent *parent_;
+};
+
+template<typename... Ts>
 class NanoleafSendOnAction : public Action<Ts...> {
  public:
     NanoleafSendOnAction(NanoleafWifiComponent *parent) : parent_(parent) {}
