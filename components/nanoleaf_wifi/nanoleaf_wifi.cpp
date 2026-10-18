@@ -30,12 +30,24 @@ void NanoleafWifiComponent::add_light(const std::string &id, const std::string &
     lights_.push_back(l);
 }
 
+static std::string normalize_id(const std::string &s) {
+    std::string out;
+    for (char c : s) {
+        if (c != '_' && c != '-' && c != ' ') {
+            out.push_back(tolower((unsigned char)c));
+        }
+    }
+    return out;
+}
+
 NanoleafWifiLight *NanoleafWifiComponent::find_light(const std::string &light_id) {
+    std::string norm_target = normalize_id(light_id);
     for (auto &light : lights_) {
-        if (light.id == light_id) {
+        if (light.id == light_id || normalize_id(light.id) == norm_target) {
             return &light;
         }
     }
+    ESP_LOGE(TAG, "Light '%s' not found in %d configured light(s)", light_id.c_str(), (int)lights_.size());
     return nullptr;
 }
 
@@ -257,36 +269,38 @@ bool NanoleafWifiComponent::send_udp_frame(NanoleafWifiLight &light, uint8_t r, 
         ESP_LOGW(TAG, "sendto() UDP frame to %s:%d failed: errno %d", light.resolved_ip.c_str(), light.udp_port, errno);
         return false;
     }
-    ESP_LOGD(TAG, "UDP stream frame sent to %s:%d (R=%d G=%d B=%d)", light.resolved_ip.c_str(), light.udp_port, r, g, b);
+    ESP_LOGI(TAG, "UDP stream frame sent to %s:%d (R=%d G=%d B=%d)", light.resolved_ip.c_str(), light.udp_port, r, g, b);
     return true;
 }
 
 void NanoleafWifiComponent::send_on(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
     auto *light = find_light(light_id);
-    if (!light) {
-        ESP_LOGE(TAG, "Light '%s' not found", light_id.c_str());
-        return;
+    if (!light) return;
+
+    if (!light->extcontrol_active && !light->auth_token.empty()) {
+        enable_extcontrol(light->id);
     }
+
     uint16_t t_100ms = (transition_ms + 50) / 100;
     send_udp_frame(*light, r, g, b, w, t_100ms);
 }
 
 void NanoleafWifiComponent::send_off(const std::string &light_id, uint32_t transition_ms) {
     auto *light = find_light(light_id);
-    if (!light) {
-        ESP_LOGE(TAG, "Light '%s' not found", light_id.c_str());
-        return;
-    }
+    if (!light) return;
+
     uint16_t t_100ms = (transition_ms + 50) / 100;
     send_udp_frame(*light, 0, 0, 0, 0, t_100ms);
 }
 
 void NanoleafWifiComponent::set_color(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
     auto *light = find_light(light_id);
-    if (!light) {
-        ESP_LOGE(TAG, "Light '%s' not found", light_id.c_str());
-        return;
+    if (!light) return;
+
+    if (!light->extcontrol_active && !light->auth_token.empty()) {
+        enable_extcontrol(light->id);
     }
+
     uint16_t t_100ms = (transition_ms + 50) / 100;
     send_udp_frame(*light, r, g, b, w, t_100ms);
 }
