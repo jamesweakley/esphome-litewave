@@ -161,13 +161,15 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
 
     // 3. Query mDNS services (_nanoleafapi._tcp and _ltpdu._tcp)
     std::string ip_found;
-    uint16_t port_found = light.port;
+    uint16_t port_found = 0;
     if (query_and_match_service("_nanoleafapi", "_tcp", light.host, ip_found, port_found) ||
         query_and_match_service("_ltpdu", "_tcp", light.host, ip_found, port_found) ||
         query_and_match_service("_nanoleafapi", "_tcp", light.id, ip_found, port_found) ||
         query_and_match_service("_ltpdu", "_tcp", light.id, ip_found, port_found)) {
         light.resolved_ip = ip_found;
-        light.port = port_found;
+        if (light.port == 0 && port_found != 0) {
+            light.port = port_found;
+        }
         ESP_LOGI(TAG, "mDNS resolved '%s' -> %s:%d", light.host.c_str(), light.resolved_ip.c_str(), light.port);
         return true;
     }
@@ -386,13 +388,22 @@ bool NanoleafWifiComponent::activate_extcontrol(NanoleafWifiLight &light) {
 }
 
 void NanoleafWifiComponent::queue_command(const HttpCommand &cmd) {
-    if (!network::is_connected() || cmd_queue_ == nullptr) return;
-    xQueueSend(cmd_queue_, &cmd, 0);
+    if (!network::is_connected()) {
+        ESP_LOGW(TAG, "Cannot queue command for '%s': Wi-Fi not connected", cmd.light_id);
+        return;
+    }
+    if (cmd_queue_ == nullptr) {
+        ESP_LOGE(TAG, "Command queue not initialized");
+        return;
+    }
+    if (xQueueSend(cmd_queue_, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Command queue full, dropped command for '%s'", cmd.light_id);
+    }
 }
 
 void NanoleafWifiComponent::send_on(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
     HttpCommand cmd;
-    cmd.light_id = light_id;
+    strncpy(cmd.light_id, light_id.c_str(), sizeof(cmd.light_id) - 1);
     cmd.type = HttpCmdType::ON;
     cmd.r = r;
     cmd.g = g;
@@ -403,7 +414,7 @@ void NanoleafWifiComponent::send_on(const std::string &light_id, uint8_t r, uint
 
 void NanoleafWifiComponent::send_off(const std::string &light_id, uint32_t transition_ms) {
     HttpCommand cmd;
-    cmd.light_id = light_id;
+    strncpy(cmd.light_id, light_id.c_str(), sizeof(cmd.light_id) - 1);
     cmd.type = HttpCmdType::OFF;
     cmd.transition_ms = transition_ms;
     queue_command(cmd);
@@ -411,7 +422,7 @@ void NanoleafWifiComponent::send_off(const std::string &light_id, uint32_t trans
 
 void NanoleafWifiComponent::set_color(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
     HttpCommand cmd;
-    cmd.light_id = light_id;
+    strncpy(cmd.light_id, light_id.c_str(), sizeof(cmd.light_id) - 1);
     cmd.type = HttpCmdType::COLOR;
     cmd.r = r;
     cmd.g = g;
@@ -422,7 +433,7 @@ void NanoleafWifiComponent::set_color(const std::string &light_id, uint8_t r, ui
 
 void NanoleafWifiComponent::set_brightness(const std::string &light_id, uint8_t brightness, uint32_t transition_ms) {
     HttpCommand cmd;
-    cmd.light_id = light_id;
+    strncpy(cmd.light_id, light_id.c_str(), sizeof(cmd.light_id) - 1);
     cmd.type = HttpCmdType::BRIGHTNESS;
     cmd.brightness = brightness > 100 ? 100 : brightness;
     cmd.transition_ms = transition_ms;
@@ -431,7 +442,7 @@ void NanoleafWifiComponent::set_brightness(const std::string &light_id, uint8_t 
 
 void NanoleafWifiComponent::set_color_temperature(const std::string &light_id, uint16_t color_temp, uint32_t transition_ms) {
     HttpCommand cmd;
-    cmd.light_id = light_id;
+    strncpy(cmd.light_id, light_id.c_str(), sizeof(cmd.light_id) - 1);
     cmd.type = HttpCmdType::COLOR_TEMP;
     cmd.color_temp = color_temp;
     cmd.transition_ms = transition_ms;

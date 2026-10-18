@@ -33,8 +33,8 @@ struct NanoleafWifiLight {
 };
 
 struct HttpCommand {
-    std::string light_id;
-    HttpCmdType type;
+    char light_id[32]{0};
+    HttpCmdType type{HttpCmdType::ON};
     uint8_t r{255};
     uint8_t g{255};
     uint8_t b{255};
