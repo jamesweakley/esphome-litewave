@@ -10,13 +10,14 @@ DEPENDENCIES = ["wifi"]
 CONF_LIGHTS = "lights"
 CONF_HOST = "host"
 CONF_PORT = "port"
-CONF_UDP_PORT = "udp_port"
 CONF_AUTH_TOKEN = "auth_token"
 CONF_LIGHT_ID = "light_id"
 CONF_RED = "red"
 CONF_GREEN = "green"
 CONF_BLUE = "blue"
 CONF_WHITE = "white"
+CONF_BRIGHTNESS = "brightness"
+CONF_COLOR_TEMPERATURE = "color_temperature"
 CONF_TRANSITION_MS = "transition_ms"
 
 nanoleaf_wifi_ns = cg.esphome_ns.namespace("nanoleaf_wifi")
@@ -28,13 +29,14 @@ NanoleafEnableExtControlAction = nanoleaf_wifi_ns.class_("NanoleafEnableExtContr
 NanoleafSendOnAction = nanoleaf_wifi_ns.class_("NanoleafSendOnAction", automation.Action)
 NanoleafSendOffAction = nanoleaf_wifi_ns.class_("NanoleafSendOffAction", automation.Action)
 NanoleafSetColorAction = nanoleaf_wifi_ns.class_("NanoleafSetColorAction", automation.Action)
+NanoleafSetBrightnessAction = nanoleaf_wifi_ns.class_("NanoleafSetBrightnessAction", automation.Action)
+NanoleafSetColorTemperatureAction = nanoleaf_wifi_ns.class_("NanoleafSetColorTemperatureAction", automation.Action)
 
 LIGHT_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ID): cv.string_strict,
         cv.Required(CONF_HOST): cv.string_strict,
         cv.Optional(CONF_PORT, default=12566): cv.port,
-        cv.Optional(CONF_UDP_PORT, default=60222): cv.port,
         cv.Optional(CONF_AUTH_TOKEN, default=""): cv.string_strict,
     }
 )
@@ -94,6 +96,24 @@ SET_COLOR_ACTION_SCHEMA = cv.Schema(
         cv.Required(CONF_GREEN): cv.templatable(cv.int_range(min=0, max=255)),
         cv.Required(CONF_BLUE): cv.templatable(cv.int_range(min=0, max=255)),
         cv.Optional(CONF_WHITE, default=0): cv.templatable(cv.int_range(min=0, max=255)),
+        cv.Optional(CONF_TRANSITION_MS, default=100): cv.templatable(cv.positive_int),
+    }
+)
+
+SET_BRIGHTNESS_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(NanoleafWifiComponent),
+        cv.Required(CONF_LIGHT_ID): cv.templatable(cv.string_strict),
+        cv.Required(CONF_BRIGHTNESS): cv.templatable(cv.int_range(min=0, max=100)),
+        cv.Optional(CONF_TRANSITION_MS, default=100): cv.templatable(cv.positive_int),
+    }
+)
+
+SET_COLOR_TEMP_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(NanoleafWifiComponent),
+        cv.Required(CONF_LIGHT_ID): cv.templatable(cv.string_strict),
+        cv.Required(CONF_COLOR_TEMPERATURE): cv.templatable(cv.int_range(min=2000, max=6500)),
         cv.Optional(CONF_TRANSITION_MS, default=100): cv.templatable(cv.positive_int),
     }
 )
@@ -181,6 +201,36 @@ async def nanoleaf_set_color_to_code(config, action_id, template_arg, args):
     return var
 
 
+@automation.register_action(
+    "nanoleaf_wifi.set_brightness",
+    NanoleafSetBrightnessAction,
+    SET_BRIGHTNESS_ACTION_SCHEMA,
+)
+async def nanoleaf_set_brightness_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    template_id = await cg.templatable(config[CONF_LIGHT_ID], args, cg.std_string)
+    cg.add(var.set_light_id(template_id))
+    cg.add(var.set_brightness(await cg.templatable(config[CONF_BRIGHTNESS], args, cg.uint8)))
+    cg.add(var.set_transition_ms(await cg.templatable(config[CONF_TRANSITION_MS], args, cg.uint32)))
+    return var
+
+
+@automation.register_action(
+    "nanoleaf_wifi.set_color_temperature",
+    NanoleafSetColorTemperatureAction,
+    SET_COLOR_TEMP_ACTION_SCHEMA,
+)
+async def nanoleaf_set_color_temp_to_code(config, action_id, template_arg, args):
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+    template_id = await cg.templatable(config[CONF_LIGHT_ID], args, cg.std_string)
+    cg.add(var.set_light_id(template_id))
+    cg.add(var.set_color_temperature(await cg.templatable(config[CONF_COLOR_TEMPERATURE], args, cg.uint16)))
+    cg.add(var.set_transition_ms(await cg.templatable(config[CONF_TRANSITION_MS], args, cg.uint32)))
+    return var
+
+
 async def to_code(config):
     esp32.include_builtin_idf_component("mdns")
     var = cg.new_Pvariable(config[CONF_ID])
@@ -192,7 +242,6 @@ async def to_code(config):
                 light_conf[CONF_ID],
                 light_conf[CONF_HOST],
                 light_conf[CONF_PORT],
-                light_conf[CONF_UDP_PORT],
                 light_conf[CONF_AUTH_TOKEN],
             )
         )

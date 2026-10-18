@@ -1,6 +1,6 @@
 # esphome-litewave
 
-ESPHome external component for controlling Nanoleaf lights via the proprietary **Litewave protocol** over raw IEEE 802.15.4 broadcasts.
+ESPHome external component for controlling Nanoleaf lights via the proprietary **Litewave protocol** over raw IEEE 802.15.4 broadcasts, and via the **Nanoleaf Local HTTP REST API** for Wi-Fi Matter devices.
 
 Works on **ESP32-C6** and **ESP32-H2** (or any ESP32 with an 802.15.4 radio). Sends instant Litewave commands directly to Nanoleaf Essentials Downlights (NL65), bulbs, and strips — working immediately on boot with zero WiFi or Thread dependency.
 
@@ -237,9 +237,10 @@ button:
 
 For **Matter-over-Wi-Fi** Nanoleaf devices that do not have an 802.15.4 / Thread radio (such as the **Nanoleaf Essentials WiFi A19 model `NL75K1`**, Holiday String Lights, and Wi-Fi Lightstrips), use the `nanoleaf_wifi` external component.
 
-It provides direct local control from the ESP32 over your local Wi-Fi network without Home Assistant using:
-1. **Local OpenAPI REST Client**: Discovers and pairs with devices by DNS/mDNS hostname (e.g. `nanoleaf-a19-3dc.local`).
-2. **`extControl` UDP Streaming**: Streams unauthenticated binary RGB frames directly to UDP port `60222` with sub-10ms response time.
+It provides direct local control from the ESP32 over your local Wi-Fi network without Home Assistant using the **Nanoleaf Local HTTP REST API** (`/api/v1/<auth_token>/state`):
+1. **Deterministic HTTP Acknowledgment**: Commands are acknowledged with `HTTP 204 No Content` / `200 OK`, giving instant verification of success or offline state.
+2. **Non-blocking FreeRTOS Queue**: Actions execute in `<0.01 ms` from the main loop and are processed by a background worker task, preventing Task Watchdog Timer resets when looping across multiple bulbs.
+3. **Automatic mDNS Discovery & Resolution**: Discovers bulbs by service name (`_nanoleafapi._tcp`), instance name, or `.local` hostname.
 
 ### `nanoleaf_wifi` YAML Configuration
 
@@ -253,17 +254,9 @@ nanoleaf_wifi:
     - id: bedroom_bulb
       host: "nanoleaf-a19-3dc.local"   # DNS / mDNS hostname
       port: 12566                     # OpenAPI HTTP port (default: 12566)
-      udp_port: 60222                 # extControl UDP port (default: 60222)
       auth_token: "qs1G6uIl9MqGnyzQM9P9bBRVHiZq79wx"  # Saved auth token
 
 button:
-  # Activate / re-arm extControl mode (when auth_token is already known):
-  - platform: template
-    name: "Enable extControl Bedroom Bulb"
-    on_press:
-      - nanoleaf_wifi.enable_extcontrol:
-          light_id: bedroom_bulb
-
   # One-time pairing / token acquisition (when pairing without token):
   - platform: template
     name: "Provision Bedroom Bulb"
@@ -271,39 +264,51 @@ button:
       - nanoleaf_wifi.provision_light:
           light_id: bedroom_bulb
 
-  # Direct, instant UDP control:
+  # Direct HTTP REST control:
   - platform: template
     name: "Bedroom Bulb ON"
     on_press:
       - nanoleaf_wifi.send_on:
           light_id: bedroom_bulb
-          red: 255
-          green: 255
-          blue: 255
-          transition_ms: 100
 
   - platform: template
     name: "Bedroom Bulb OFF"
     on_press:
       - nanoleaf_wifi.send_off:
           light_id: bedroom_bulb
-          transition_ms: 100
 
   - platform: template
-    name: "Bedroom Bulb Warm White"
+    name: "Bedroom Bulb Red"
     on_press:
       - nanoleaf_wifi.set_color:
           light_id: bedroom_bulb
           red: 255
-          green: 147
-          blue: 41
-          transition_ms: 200
+          green: 0
+          blue: 0
+
+  - platform: template
+    name: "Bedroom Bulb 50% Brightness"
+    on_press:
+      - nanoleaf_wifi.set_brightness:
+          light_id: bedroom_bulb
+          brightness: 50
+
+  - platform: template
+    name: "Bedroom Bulb Warm White (2700K)"
+    on_press:
+      - nanoleaf_wifi.set_color_temperature:
+          light_id: bedroom_bulb
+          color_temperature: 2700
 ```
 
-### `nanoleaf_wifi` Setup & Usage Flow:
-1. **Initial Pairing (if token is not known):** Tap **Connect to API** in the Nanoleaf App settings, then trigger `nanoleaf_wifi.provision_light` to fetch and log the permanent `auth_token`.
-2. **Re-enabling extControl:** If your `auth_token` is already in YAML, simply call `nanoleaf_wifi.enable_extcontrol: light_id: bedroom_bulb` (or run it on boot) to ensure the bulb is powered on and streaming mode is active.
-3. **Instant Control:** Once in `extControl` mode, all `send_on`, `send_off`, and `set_color` actions stream raw binary frames over UDP port 60222 peer-to-peer with zero latency.
+### `nanoleaf_wifi` Available Actions:
+
+- `nanoleaf_wifi.send_on: light_id: <light_id> [, red: 255, green: 255, blue: 255, transition_ms: 100]` — Turns the bulb ON (with optional RGB color).
+- `nanoleaf_wifi.send_off: light_id: <light_id> [, transition_ms: 100]` — Turns the bulb OFF.
+- `nanoleaf_wifi.set_color: light_id: <light_id>, red: <0-255>, green: <0-255>, blue: <0-255> [, transition_ms: 100]` — Sets RGB color (automatically converted to Hue and Saturation).
+- `nanoleaf_wifi.set_brightness: light_id: <light_id>, brightness: <0-100> [, transition_ms: 100]` — Sets brightness level (0–100%).
+- `nanoleaf_wifi.set_color_temperature: light_id: <light_id>, color_temperature: <2000-6500> [, transition_ms: 100]` — Sets white color temperature in Kelvin.
+- `nanoleaf_wifi.provision_light: light_id: <light_id>` — Requests a new `auth_token` from `/api/v1/new` while pairing mode is open in the Nanoleaf App.
 
 ---
 

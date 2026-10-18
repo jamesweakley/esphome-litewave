@@ -1,35 +1,38 @@
 #include "nanoleaf_wifi.h"
 #include "esphome/components/network/util.h"
 #include "mdns.h"
+#include <algorithm>
+#include <cmath>
 
 namespace esphome {
 namespace nanoleaf_wifi {
 
 static const char *const TAG = "nanoleaf_wifi";
 
-void NanoleafWifiComponent::setup() {
-    ESP_LOGCONFIG(TAG, "Nanoleaf WiFi component initialized.");
-}
+static void rgb_to_hs(uint8_t r, uint8_t g, uint8_t b, uint16_t &hue, uint8_t &sat) {
+    float rf = r / 255.0f;
+    float gf = g / 255.0f;
+    float bf = b / 255.0f;
+    float max_val = std::max(rf, std::max(gf, bf));
+    float min_val = std::min(rf, std::min(gf, bf));
+    float delta = max_val - min_val;
 
-void NanoleafWifiComponent::dump_config() {
-    ESP_LOGCONFIG(TAG, "Nanoleaf WiFi Component:");
-    for (const auto &light : lights_) {
-        ESP_LOGCONFIG(TAG, "  Light '%s':", light.id.c_str());
-        ESP_LOGCONFIG(TAG, "    Host: %s:%d", light.host.c_str(), light.port);
-        ESP_LOGCONFIG(TAG, "    UDP Port: %d", light.udp_port);
-        ESP_LOGCONFIG(TAG, "    Auth Token: %s", light.auth_token.empty() ? "(none - needs provision)" : "[configured]");
+    float h = 0.0f;
+    float s = (max_val == 0.0f) ? 0.0f : (delta / max_val);
+
+    if (delta > 0.0001f) {
+        if (max_val == rf) {
+            h = 60.0f * (fmodf(((gf - bf) / delta), 6.0f));
+        } else if (max_val == gf) {
+            h = 60.0f * (((bf - rf) / delta) + 2.0f);
+        } else {
+            h = 60.0f * (((rf - gf) / delta) + 4.0f);
+        }
+        if (h < 0.0f) h += 360.0f;
     }
-}
 
-void NanoleafWifiComponent::add_light(const std::string &id, const std::string &host,
-                                      uint16_t port, uint16_t udp_port, const std::string &auth_token) {
-    NanoleafWifiLight l;
-    l.id = id;
-    l.host = host;
-    l.port = port != 0 ? port : 12566;
-    l.udp_port = udp_port != 0 ? udp_port : 60222;
-    l.auth_token = auth_token;
-    lights_.push_back(l);
+    hue = static_cast<uint16_t>(h + 0.5f);
+    sat = static_cast<uint8_t>((s * 100.0f) + 0.5f);
 }
 
 static std::string normalize_id(const std::string &s) {
@@ -40,6 +43,35 @@ static std::string normalize_id(const std::string &s) {
         }
     }
     return out;
+}
+
+void NanoleafWifiComponent::setup() {
+    ESP_LOGCONFIG(TAG, "Nanoleaf WiFi HTTP component initialized.");
+    cmd_queue_ = xQueueCreate(20, sizeof(HttpCommand));
+    if (cmd_queue_ != nullptr) {
+        xTaskCreate(worker_task, "nl_http_worker", 4096, this, tskIDLE_PRIORITY + 1, nullptr);
+    } else {
+        ESP_LOGE(TAG, "Failed to create HTTP command queue");
+    }
+}
+
+void NanoleafWifiComponent::dump_config() {
+    ESP_LOGCONFIG(TAG, "Nanoleaf WiFi Component (HTTP REST API):");
+    for (const auto &light : lights_) {
+        ESP_LOGCONFIG(TAG, "  Light '%s':", light.id.c_str());
+        ESP_LOGCONFIG(TAG, "    Host: %s:%d", light.host.c_str(), light.port);
+        ESP_LOGCONFIG(TAG, "    Auth Token: %s", light.auth_token.empty() ? "(none - needs provision)" : "[configured]");
+    }
+}
+
+void NanoleafWifiComponent::add_light(const std::string &id, const std::string &host,
+                                      uint16_t port, const std::string &auth_token) {
+    NanoleafWifiLight l;
+    l.id = id;
+    l.host = host;
+    l.port = port != 0 ? port : 12566;
+    l.auth_token = auth_token;
+    lights_.push_back(l);
 }
 
 NanoleafWifiLight *NanoleafWifiComponent::find_light(const std::string &light_id) {
@@ -114,7 +146,7 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
         return true;
     }
 
-    // 1. Fast check: if host is already an IPv4 literal, avoid all queries
+    // 1. Fast check: if host is already an IPv4 literal
     struct in_addr dummy;
     if (inet_pton(AF_INET, light.host.c_str(), &dummy) == 1) {
         light.resolved_ip = light.host;
@@ -158,7 +190,7 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
         return false;
     }
 
-    // 5. Fallback: unicast standard DNS query for standard domain names
+    // 5. Fallback: unicast standard DNS query
     struct addrinfo hints{}, *res = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
@@ -175,6 +207,67 @@ bool NanoleafWifiComponent::resolve_host(NanoleafWifiLight &light) {
     }
 
     ESP_LOGW(TAG, "Failed to resolve hostname '%s'", light.host.c_str());
+    return false;
+}
+
+bool NanoleafWifiComponent::http_put_state(NanoleafWifiLight &light, const std::string &json_payload, const char *action_name) {
+    if (light.auth_token.empty()) {
+        ESP_LOGE(TAG, "Cannot execute %s on '%s': no auth_token configured", action_name, light.id.c_str());
+        return false;
+    }
+    if (light.resolved_ip.empty() && !resolve_host(light)) {
+        return false;
+    }
+
+    int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() failed: errno %d", errno);
+        return false;
+    }
+
+    struct timeval tv{ .tv_sec = 2, .tv_usec = 0 };
+    ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(light.port);
+    inet_pton(AF_INET, light.resolved_ip.c_str(), &addr.sin_addr);
+
+    if (::connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "TCP connect to %s:%d failed: errno %d (device offline)", light.resolved_ip.c_str(), light.port, errno);
+        ::close(sock);
+        return false;
+    }
+
+    std::string req = "PUT /api/v1/" + light.auth_token + "/state HTTP/1.1\r\n" +
+                      "Host: " + light.host + "\r\n" +
+                      "Content-Type: application/json\r\n" +
+                      "Content-Length: " + std::to_string(json_payload.length()) + "\r\n" +
+                      "Connection: close\r\n\r\n" +
+                      json_payload;
+
+    ::send(sock, req.c_str(), req.length(), 0);
+
+    char resp[256];
+    int n = ::recv(sock, resp, sizeof(resp) - 1, 0);
+    ::close(sock);
+
+    if (n > 0) {
+        resp[n] = '\0';
+        std::string s(resp);
+        if (s.find("204 No Content") != std::string::npos || s.find("200 OK") != std::string::npos) {
+            ESP_LOGI(TAG, "Light '%s' -> %s (HTTP 204 Success)", light.id.c_str(), action_name);
+            return true;
+        } else if (s.find("401 Unauthorized") != std::string::npos) {
+            ESP_LOGE(TAG, "Light '%s' rejected auth token (HTTP 401 Unauthorized)", light.id.c_str());
+            return false;
+        }
+        ESP_LOGW(TAG, "Light '%s' returned status:\n%s", light.id.c_str(), resp);
+        return false;
+    }
+
+    ESP_LOGW(TAG, "No HTTP response from %s:%d for %s", light.resolved_ip.c_str(), light.port, action_name);
     return false;
 }
 
@@ -221,7 +314,6 @@ bool NanoleafWifiComponent::request_new_auth_token(NanoleafWifiLight &light) {
         return false;
     }
 
-    // Parse "auth_token":"..."
     auto pos = s.find("\"auth_token\"");
     if (pos != std::string::npos) {
         auto colon = s.find(':', pos);
@@ -239,42 +331,6 @@ bool NanoleafWifiComponent::request_new_auth_token(NanoleafWifiLight &light) {
     return false;
 }
 
-bool NanoleafWifiComponent::set_power_state(NanoleafWifiLight &light, bool on) {
-    if (light.auth_token.empty()) return false;
-    if (light.resolved_ip.empty() && !resolve_host(light)) return false;
-
-    int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock < 0) return false;
-
-    struct timeval tv{ .tv_sec = 5, .tv_usec = 0 };
-    ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    ::setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(light.port);
-    inet_pton(AF_INET, light.resolved_ip.c_str(), &addr.sin_addr);
-
-    if (::connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ::close(sock);
-        return false;
-    }
-
-    std::string payload = on ? "{\"on\":{\"value\":true}}" : "{\"on\":{\"value\":false}}";
-    std::string req = "PUT /api/v1/" + light.auth_token + "/state HTTP/1.1\r\n" +
-                      "Host: " + light.host + "\r\n" +
-                      "Content-Type: application/json\r\n" +
-                      "Content-Length: " + std::to_string(payload.length()) + "\r\n" +
-                      "Connection: close\r\n\r\n" +
-                      payload;
-
-    ::send(sock, req.c_str(), req.length(), 0);
-    char resp[256];
-    int n = ::recv(sock, resp, sizeof(resp) - 1, 0);
-    ::close(sock);
-    return (n > 0);
-}
-
 bool NanoleafWifiComponent::activate_extcontrol(NanoleafWifiLight &light) {
     if (light.auth_token.empty()) {
         ESP_LOGE(TAG, "Cannot activate extControl: no auth_token for light '%s'", light.id.c_str());
@@ -283,9 +339,6 @@ bool NanoleafWifiComponent::activate_extcontrol(NanoleafWifiLight &light) {
     if (light.resolved_ip.empty() && !resolve_host(light)) {
         return false;
     }
-
-    // Ensure bulb power state is ON before activating extControl
-    set_power_state(light, true);
 
     int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) return false;
@@ -323,7 +376,6 @@ bool NanoleafWifiComponent::activate_extcontrol(NanoleafWifiLight &light) {
         resp[n] = '\0';
         std::string s(resp);
         if (s.find("200 OK") != std::string::npos || s.find("204 No Content") != std::string::npos) {
-            light.extcontrol_active = true;
             ESP_LOGI(TAG, "extControl mode successfully activated on light '%s' (%s)",
                      light.id.c_str(), light.resolved_ip.c_str());
             return true;
@@ -333,71 +385,109 @@ bool NanoleafWifiComponent::activate_extcontrol(NanoleafWifiLight &light) {
     return false;
 }
 
-bool NanoleafWifiComponent::send_udp_frame(NanoleafWifiLight &light, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint16_t transition_100ms) {
-    if (!network::is_connected()) {
-        return false;
-    }
-
-    if (udp_sock_ < 0) {
-        udp_sock_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (udp_sock_ < 0) return false;
-    }
-
-    if (light.resolved_ip.empty() && !resolve_host(light)) {
-        return false;
-    }
-
-    // Binary format for extControl v2 (1 panel):
-    // [NumPanels (2B BE = 1)] [PanelId (2B BE = 0)] [R (1B)] [G (1B)] [B (1B)] [W (1B = 0)] [Transition (2B BE)]
-    uint8_t frame[10];
-    frame[0] = 0x00; frame[1] = 0x01; // 1 panel
-    frame[2] = 0x00; frame[3] = 0x00; // panel ID 0
-    frame[4] = r;
-    frame[5] = g;
-    frame[6] = b;
-    frame[7] = w;
-    frame[8] = (transition_100ms >> 8) & 0xFF;
-    frame[9] = transition_100ms & 0xFF;
-
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(light.udp_port);
-    inet_pton(AF_INET, light.resolved_ip.c_str(), &addr.sin_addr);
-
-    ssize_t sent = ::sendto(udp_sock_, frame, sizeof(frame), 0, (struct sockaddr *)&addr, sizeof(addr));
-    if (sent < 0) {
-        ESP_LOGW(TAG, "sendto() UDP frame to %s:%d failed: errno %d", light.resolved_ip.c_str(), light.udp_port, errno);
-        return false;
-    }
-    ESP_LOGI(TAG, "UDP stream frame sent to %s:%d (R=%d G=%d B=%d)", light.resolved_ip.c_str(), light.udp_port, r, g, b);
-    return true;
+void NanoleafWifiComponent::queue_command(const HttpCommand &cmd) {
+    if (!network::is_connected() || cmd_queue_ == nullptr) return;
+    xQueueSend(cmd_queue_, &cmd, 0);
 }
 
 void NanoleafWifiComponent::send_on(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
-    if (!network::is_connected()) return;
-    auto *light = find_light(light_id);
-    if (!light) return;
-
-    uint16_t t_100ms = (transition_ms + 50) / 100;
-    send_udp_frame(*light, r, g, b, w, t_100ms);
+    HttpCommand cmd;
+    cmd.light_id = light_id;
+    cmd.type = HttpCmdType::ON;
+    cmd.r = r;
+    cmd.g = g;
+    cmd.b = b;
+    cmd.transition_ms = transition_ms;
+    queue_command(cmd);
 }
 
 void NanoleafWifiComponent::send_off(const std::string &light_id, uint32_t transition_ms) {
-    if (!network::is_connected()) return;
-    auto *light = find_light(light_id);
-    if (!light) return;
-
-    uint16_t t_100ms = (transition_ms + 50) / 100;
-    send_udp_frame(*light, 0, 0, 0, 0, t_100ms);
+    HttpCommand cmd;
+    cmd.light_id = light_id;
+    cmd.type = HttpCmdType::OFF;
+    cmd.transition_ms = transition_ms;
+    queue_command(cmd);
 }
 
 void NanoleafWifiComponent::set_color(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
-    if (!network::is_connected()) return;
-    auto *light = find_light(light_id);
-    if (!light) return;
+    HttpCommand cmd;
+    cmd.light_id = light_id;
+    cmd.type = HttpCmdType::COLOR;
+    cmd.r = r;
+    cmd.g = g;
+    cmd.b = b;
+    cmd.transition_ms = transition_ms;
+    queue_command(cmd);
+}
 
-    uint16_t t_100ms = (transition_ms + 50) / 100;
-    send_udp_frame(*light, r, g, b, w, t_100ms);
+void NanoleafWifiComponent::set_brightness(const std::string &light_id, uint8_t brightness, uint32_t transition_ms) {
+    HttpCommand cmd;
+    cmd.light_id = light_id;
+    cmd.type = HttpCmdType::BRIGHTNESS;
+    cmd.brightness = brightness > 100 ? 100 : brightness;
+    cmd.transition_ms = transition_ms;
+    queue_command(cmd);
+}
+
+void NanoleafWifiComponent::set_color_temperature(const std::string &light_id, uint16_t color_temp, uint32_t transition_ms) {
+    HttpCommand cmd;
+    cmd.light_id = light_id;
+    cmd.type = HttpCmdType::COLOR_TEMP;
+    cmd.color_temp = color_temp;
+    cmd.transition_ms = transition_ms;
+    queue_command(cmd);
+}
+
+void NanoleafWifiComponent::worker_task(void *pvParameters) {
+    auto *self = static_cast<NanoleafWifiComponent *>(pvParameters);
+    HttpCommand cmd;
+
+    while (true) {
+        if (xQueueReceive(self->cmd_queue_, &cmd, portMAX_DELAY) == pdTRUE) {
+            auto *light = self->find_light(cmd.light_id);
+            if (!light) continue;
+
+            std::string payload;
+            const char *action_name = "State Update";
+
+            switch (cmd.type) {
+                case HttpCmdType::ON:
+                    action_name = "Turn ON";
+                    payload = "{\"on\":{\"value\":true}}";
+                    break;
+
+                case HttpCmdType::OFF:
+                    action_name = "Turn OFF";
+                    payload = "{\"on\":{\"value\":false}}";
+                    break;
+
+                case HttpCmdType::COLOR: {
+                    action_name = "Set Color";
+                    uint16_t hue = 0;
+                    uint8_t sat = 0;
+                    rgb_to_hs(cmd.r, cmd.g, cmd.b, hue, sat);
+                    payload = "{\"on\":{\"value\":true},\"hue\":{\"value\":" + std::to_string(hue) +
+                              "},\"sat\":{\"value\":" + std::to_string(sat) + "}}";
+                    break;
+                }
+
+                case HttpCmdType::BRIGHTNESS:
+                    action_name = "Set Brightness";
+                    payload = "{\"on\":{\"value\":true},\"brightness\":{\"value\":" +
+                              std::to_string(cmd.brightness) + "}}";
+                    break;
+
+                case HttpCmdType::COLOR_TEMP:
+                    action_name = "Set Color Temperature";
+                    payload = "{\"on\":{\"value\":true},\"ct\":{\"value\":" +
+                              std::to_string(cmd.color_temp) + "}}";
+                    break;
+            }
+
+            self->http_put_state(*light, payload, action_name);
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
 }
 
 void NanoleafWifiComponent::provision_task(void *pvParameters) {
@@ -432,13 +522,6 @@ void NanoleafWifiComponent::provision_task(void *pvParameters) {
             vTaskDelete(nullptr);
             return;
         }
-    }
-
-    ESP_LOGI(TAG, "Activating extControl UDP streaming mode on %s:%d...", light->resolved_ip.c_str(), light->port);
-    if (ctx->parent->activate_extcontrol(*light)) {
-        ESP_LOGI(TAG, "Provisioning succeeded! Light '%s' is now ready for UDP extControl.", light->id.c_str());
-    } else {
-        ESP_LOGE(TAG, "Failed to activate extControl mode on light '%s'", light->id.c_str());
     }
 
     delete ctx;
@@ -477,8 +560,6 @@ void NanoleafWifiComponent::extcontrol_task(void *pvParameters) {
         return;
     }
 
-    ESP_LOGI(TAG, "Enabling extControl mode for light '%s' (%s)...", light->id.c_str(), light->host.c_str());
-
     if (!ctx->parent->resolve_host(*light)) {
         ESP_LOGE(TAG, "Could not resolve hostname '%s'", light->host.c_str());
         delete ctx;
@@ -486,18 +567,12 @@ void NanoleafWifiComponent::extcontrol_task(void *pvParameters) {
         return;
     }
 
-    if (ctx->parent->activate_extcontrol(*light)) {
-        ESP_LOGI(TAG, "extControl mode successfully enabled for light '%s'.", light->id.c_str());
-    } else {
-        ESP_LOGE(TAG, "Failed to activate extControl mode on light '%s'", light->id.c_str());
-    }
-
+    ctx->parent->activate_extcontrol(*light);
     delete ctx;
     vTaskDelete(nullptr);
 }
 
 void NanoleafWifiComponent::enable_extcontrol(const std::string &light_id, const std::string &override_auth_token) {
-    ESP_LOGI(TAG, "Triggering background enable_extcontrol for light '%s'...", light_id.c_str());
     auto *ctx = new ProvisionContext{this, light_id, override_auth_token};
     BaseType_t res = xTaskCreate(extcontrol_task, "nl_extctrl", 4096, ctx, tskIDLE_PRIORITY + 1, nullptr);
     if (res != pdPASS) {
