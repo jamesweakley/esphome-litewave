@@ -283,10 +283,6 @@ void NanoleafWifiComponent::send_on(const std::string &light_id, uint8_t r, uint
     auto *light = find_light(light_id);
     if (!light) return;
 
-    if (!light->extcontrol_active && !light->auth_token.empty()) {
-        enable_extcontrol(light->id);
-    }
-
     uint16_t t_100ms = (transition_ms + 50) / 100;
     send_udp_frame(*light, r, g, b, w, t_100ms);
 }
@@ -304,10 +300,6 @@ void NanoleafWifiComponent::set_color(const std::string &light_id, uint8_t r, ui
     if (!network::is_connected()) return;
     auto *light = find_light(light_id);
     if (!light) return;
-
-    if (!light->extcontrol_active && !light->auth_token.empty()) {
-        enable_extcontrol(light->id);
-    }
 
     uint16_t t_100ms = (transition_ms + 50) / 100;
     send_udp_frame(*light, r, g, b, w, t_100ms);
