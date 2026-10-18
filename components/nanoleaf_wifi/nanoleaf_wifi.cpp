@@ -1,4 +1,5 @@
 #include "nanoleaf_wifi.h"
+#include "esphome/components/network/util.h"
 
 namespace esphome {
 namespace nanoleaf_wifi {
@@ -238,6 +239,10 @@ bool NanoleafWifiComponent::activate_extcontrol(NanoleafWifiLight &light) {
 }
 
 bool NanoleafWifiComponent::send_udp_frame(NanoleafWifiLight &light, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint16_t transition_100ms) {
+    if (!network::is_connected()) {
+        return false;
+    }
+
     if (udp_sock_ < 0) {
         udp_sock_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (udp_sock_ < 0) return false;
@@ -274,6 +279,7 @@ bool NanoleafWifiComponent::send_udp_frame(NanoleafWifiLight &light, uint8_t r, 
 }
 
 void NanoleafWifiComponent::send_on(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
+    if (!network::is_connected()) return;
     auto *light = find_light(light_id);
     if (!light) return;
 
@@ -286,6 +292,7 @@ void NanoleafWifiComponent::send_on(const std::string &light_id, uint8_t r, uint
 }
 
 void NanoleafWifiComponent::send_off(const std::string &light_id, uint32_t transition_ms) {
+    if (!network::is_connected()) return;
     auto *light = find_light(light_id);
     if (!light) return;
 
@@ -294,6 +301,7 @@ void NanoleafWifiComponent::send_off(const std::string &light_id, uint32_t trans
 }
 
 void NanoleafWifiComponent::set_color(const std::string &light_id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint32_t transition_ms) {
+    if (!network::is_connected()) return;
     auto *light = find_light(light_id);
     if (!light) return;
 
