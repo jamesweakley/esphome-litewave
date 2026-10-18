@@ -5,19 +5,8 @@ namespace nanoleaf_wifi {
 
 static const char *const TAG = "nanoleaf_wifi";
 
-void NanoleafWifiComponent::init_resolver_task(void *pvParameters) {
-    auto *self = static_cast<NanoleafWifiComponent *>(pvParameters);
-    // Wait a brief moment for WiFi connection to stabilize
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    for (auto &light : self->lights_) {
-        self->resolve_host(light);
-    }
-    vTaskDelete(nullptr);
-}
-
 void NanoleafWifiComponent::setup() {
     ESP_LOGCONFIG(TAG, "Nanoleaf WiFi component initialized.");
-    xTaskCreate(init_resolver_task, "nl_resolver", 4096, this, tskIDLE_PRIORITY + 1, nullptr);
 }
 
 void NanoleafWifiComponent::dump_config() {

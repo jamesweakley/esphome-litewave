@@ -49,7 +49,6 @@ class NanoleafWifiComponent : public Component {
 
     static void provision_task(void *pvParameters);
     static void extcontrol_task(void *pvParameters);
-    static void init_resolver_task(void *pvParameters);
 
     struct ProvisionContext {
         NanoleafWifiComponent *parent;
