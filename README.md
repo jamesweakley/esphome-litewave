@@ -254,7 +254,7 @@ nanoleaf_wifi:
     - id: bedroom_bulb
       host: "nanoleaf-a19-3dc.local"   # DNS / mDNS hostname
       port: 12566                     # OpenAPI HTTP port (default: 12566)
-      auth_token: "qs1G6uIl9MqGnyzQM9P9bBRVHiZq79wx"  # Saved auth token
+      auth_token: "qs1G6u....q79wx"  # Saved auth token
 
 button:
   # One-time pairing / token acquisition (when pairing without token):
